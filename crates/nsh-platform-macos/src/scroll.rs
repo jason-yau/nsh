@@ -61,10 +61,10 @@ use nsh_core::{
     },
 };
 use objc2::{MainThreadOnly, define_class, msg_send, rc::Retained};
-use objc2_app_kit::{NSResponder, NSView};
+use objc2_app_kit::{NSResponder, NSScroller, NSScrollerStyle, NSView};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGColor;
-use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSUserDefaults, ns_string};
+use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint};
 use objc2_quartz_core::CALayer;
 
 use crate::{
@@ -2632,12 +2632,18 @@ pub(crate) fn grabs_thumb(view: &NshView, x: f32, y: f32) -> bool {
         && (start - THUMB_SLOP..=start + len + THUMB_SLOP).contains(&along)
 }
 
-/// Reveal the indicator on hover unless the user only wants it while scrolling.
+/// Whether the system shows scrollers only while scrolling (the overlay
+/// style, which a trackpad or "Show scroll bars: When scrolling" gives)
+/// rather than as legacy bars that stay where they are. Asked at each use:
+/// AppKit follows the setting and the pointing devices that come and go.
+fn overlay_scrollers(view: &NshView) -> bool {
+    NSScroller::preferredScrollerStyle(view.mtm()) == NSScrollerStyle::Overlay
+}
+
+/// Reveal the indicator on hover, as legacy scrollers are always there;
+/// with overlay scrollers the indicator shows only while scrolling.
 pub(crate) fn hovered(surface: &Rc<Surface>, view: &NshView) {
-    if NSUserDefaults::standardUserDefaults()
-        .stringForKey(ns_string!("AppleShowScrollBars"))
-        .is_some_and(|setting| setting.isEqualToString(ns_string!("WhenScrolling")))
-    {
+    if overlay_scrollers(view) {
         return;
     }
     {

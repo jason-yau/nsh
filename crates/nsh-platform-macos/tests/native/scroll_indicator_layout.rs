@@ -247,14 +247,15 @@ pub(super) fn run() {
     let mtm = MainThreadMarker::new().expect("the checks run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.finishLaunching();
-    // The indicator shows on hover unless the user only wants it while
-    // scrolling: ask for it in this process only (the argument domain is
-    // volatile and not saved).
+    // The indicator shows on hover with legacy scrollers (the system's
+    // style, which "Always" gives whatever the pointing devices): ask for
+    // it in this process only (the argument domain is volatile and not
+    // saved).
     let defaults = NSUserDefaults::standardUserDefaults();
     let shows = NSDictionary::from_slices(
         &[&*NSString::from_str("AppleShowScrollBars")],
         &[&*Retained::into_super(Retained::into_super(
-            NSString::from_str("Automatic"),
+            NSString::from_str("Always"),
         ))],
     );
     // SAFETY: a dictionary of strings for the argument domain.

@@ -97,7 +97,7 @@ scroll().horizontal().scrollbar(false).child(
 
 Right to left (see [Device and environment](./device-and-environment.md#right-to-left)), a horizontal scroll view starts at its right end and keeps its distance from it.
 
-Fingers drag scroll views. On the desktop (macOS, Windows, Linux) and in the browser, the mouse scrolls as in desktop apps: with its wheel (Shift + wheel scrolls horizontally), the touchpad, the keyboard and the scroll indicator, which shows while the mouse moves over the view and drags as a scroll bar; mouse drags go to the app's pans, responders and text selection. Touchscreens on desktops drag scroll views as fingers do. `scrollbar={false}` hides the indicator on either axis: a mouse without a horizontal wheel moves a horizontal view with Shift + wheel, with the wheel where nothing around it scrolls vertically, and with the keyboard.
+Fingers drag scroll views. On the desktop (macOS, Windows, Linux) and in the browser, the mouse scrolls as in desktop apps: with its wheel (Shift + wheel scrolls horizontally), the touchpad, the keyboard and the scroll indicator, which shows while the mouse moves over the view (on macOS only where the system's scrollers are the legacy ones: with overlay scrollers, which a trackpad or *Show scroll bars: When scrolling* gives, it shows while the view scrolls, as in AppKit) and drags as a scroll bar; mouse drags go to the app's pans, responders and text selection. Touchscreens on desktops drag scroll views as fingers do. `scrollbar={false}` hides the indicator on either axis: a mouse without a horizontal wheel moves a horizontal view with Shift + wheel, with the wheel where nothing around it scrolls vertically, and with the keyboard.
 
 ### Behavior props
 
