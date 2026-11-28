@@ -3553,7 +3553,7 @@ opt-level = \"s\"
             .filter(|c| !installed.as_ref().is_some_and(|d| c.dir.starts_with(d)))
             .map(|c| c.package.as_str())
             .collect();
-        if self.nsh.source().is_some() {
+        if matches!(self.nsh, Nsh::Source(_)) {
             changing.extend(
                 NSH_CRATES
                     .iter()
@@ -6575,6 +6575,27 @@ mod tests {
         let manifest = std::fs::read_to_string(app.workspace.join("Cargo.toml")).unwrap();
         assert!(manifest.contains("[patch.crates-io]"), "{manifest}");
         assert!(manifest.contains(&format!("[patch.{url:?}]")), "{manifest}");
+        // An immutable Cargo Git checkout keeps `[profile.dev.package."*"]`
+        // (`opt-level = 3`) for `nsh-*` crates; only the app's own crates stay
+        // unoptimized.
+        assert!(
+            manifest.contains("[profile.dev.package.\"git-app\"]\nopt-level = 0"),
+            "{manifest}"
+        );
+        assert!(
+            !manifest.contains("[profile.dev.package.\"nsh-platform-macos\"]"),
+            "{manifest}"
+        );
+        // A local editable checkout (`Nsh::Source`) still overrides `nsh-*` to
+        // `opt-level = 0` for fast incremental rebuilds.
+        let source_dir = app.nsh.source().expect("checkout path").to_path_buf();
+        app.nsh = Nsh::Source(source_dir);
+        app.write_workspace().unwrap();
+        let source_manifest = std::fs::read_to_string(app.workspace.join("Cargo.toml")).unwrap();
+        assert!(
+            source_manifest.contains("[profile.dev.package.\"nsh-platform-macos\"]\nopt-level = 0"),
+            "{source_manifest}"
+        );
         let host = std::fs::read_to_string(app.workspace.join("ios-host/Cargo.toml")).unwrap();
         assert!(host.contains("nsh-ios-host = { path ="), "{host}");
         assert!(!host.contains("version = \"="), "{host}");
