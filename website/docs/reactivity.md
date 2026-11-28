@@ -453,6 +453,8 @@ fn swatch() -> impl IntoElement {
 }
 ```
 
+Content you pass to a component, its children or what fills one of its slots, reads the context where that component places it, in TSX and in Rust alike: a menu's items and a submenu's trigger see what the menu provides, as well as what is provided around the menu.
+
 Read a context in a component body (or in code that runs while components are being created), not in an event handler or a timer, where there is no component to look it up from. Rust components also take the app's theme this way: `theme()` from `nsh_base` ([Theme](./rust.md#theme)).
 
 ## Error boundaries

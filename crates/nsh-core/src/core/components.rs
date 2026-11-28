@@ -263,8 +263,9 @@ pub(super) struct Instance {
     /// In a view: the owner where it places its JS children (a region's),
     /// which the components JS made among them are under.
     children_owner: Option<crate::element::Owner>,
-    /// It joined a host as its children (content a view passed a nested
-    /// component, `tabs().child(tab())`, or inside plain views of that
+    /// It joined a host as its children or a slot's fill (content a view
+    /// passed a nested component, `tabs().child(tab())`,
+    /// `sub_menu().trigger(label())`, or inside plain views of that
     /// content): its view waits, as one JS made does, to be in the tree
     /// under where that host's view places it, so it reads the context
     /// there.
@@ -2659,7 +2660,8 @@ impl<M: TextEngine> Core<M> {
             .ok()
             .map(|k| self.nodes[k as usize].inline_style.clone())
             .filter(|p| !p.is_empty());
-        // A component is made where it is (its context comes from there).
+        // A component is made where it is: its lifetime is that run's, and
+        // so is its context until a view places it (`adopt`).
         if let Inner::Component(c) = &mut inner {
             c.place(host, crate::element::Owner::current());
         }
@@ -2899,8 +2901,9 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
-    /// Node `id` joined a host as its children: the components in it, the
-    /// node itself or inside its plain views however deep
+    /// Node `id` joined a host as its children or a slot's fill: the
+    /// components in it, the node itself or inside its plain views however
+    /// deep
     /// (`tabs().child(view().child(tab()))`), are `joined`, so their views
     /// wait to be placed and read the context of the host's view as a
     /// direct child does. A component's own content joins it in turn.
@@ -4781,12 +4784,16 @@ impl<M: TextEngine> Core<M> {
         }
         let mut changed = target.fills.len() != fills.len();
         let old = std::mem::take(&mut target.fills);
+        let mut joining = Vec::new();
         for (name, parts) in fills {
             let (at, forwarded, same) = match old.iter().find(|f| f.name == name) {
                 Some(f) => (f.at, f.forwarded, f.parts == parts),
                 None => (Placement::None, None, false),
             };
             changed |= !same;
+            if !same {
+                joining.push(name);
+            }
             target.fills.push(Fill {
                 name,
                 parts,
@@ -4820,6 +4827,9 @@ impl<M: TextEngine> Core<M> {
         for (at, node) in leaving {
             self.unplace(at, node);
         }
+        for name in joining {
+            self.join_fill(nested, name, out);
+        }
         // Its slot props follow (`Some` while a fill has nodes).
         self.components.mark(nested);
         let names: Vec<&'static str> = self.components.instances[&nested]
@@ -4829,6 +4839,29 @@ impl<M: TextEngine> Core<M> {
             .collect();
         for name in names {
             self.place_fill_with(nested, name, Some((host, &*inst)));
+        }
+    }
+
+    /// The fill of slot `name` of the nested component hosted by `nested`
+    /// is content its view places, as its children are
+    /// ([`Self::join_content`]): the components in it wait to be placed
+    /// and read the context of the view that places them (`out`: an
+    /// instance taken out of the instances).
+    pub(super) fn join_fill(
+        &mut self,
+        nested: NodeId,
+        name: &'static str,
+        out: Option<(NodeId, &Instance)>,
+    ) {
+        let nodes = self
+            .components
+            .instances
+            .get(&nested)
+            .and_then(|inst| self.fill_of(inst, name))
+            .map(|fill| self.fill_nodes_with(fill, out))
+            .unwrap_or_default();
+        for node in nodes {
+            self.join_content(node);
         }
     }
 

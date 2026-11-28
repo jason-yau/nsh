@@ -869,6 +869,7 @@ impl<M: TextEngine> Core<M> {
     /// and its slot prop follows whether there are any.
     fn refill(&mut self, nested: NodeId, name: &'static str) {
         self.components.mark(nested);
+        self.join_fill(nested, name, None);
         self.place_fill(nested, name);
     }
 

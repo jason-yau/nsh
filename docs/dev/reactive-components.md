@@ -22,7 +22,7 @@ when it was written; NSH now ships capabilities and no styled components, and th
   platform's services, applied in order right after the call); an `async fn` takes none and uses the free functions.
 - **Views JS made adopt the owner above them.** A component JS creates among another's JS children is made once its
   host is in the tree, under the owner of where the component above places its children, so context and failures
-  reach it.
+  reach it. A Rust view's content for a nested component (children or a slot's fill) waits and adopts the same way.
 - **The first frame costs more.** "The first render costs about the same" did not hold: 200 Buttons take ~40%
   more core time to mount (1.04ms against 0.75ms; JS is unchanged), the bindings' computations and the props'
   signals that make every later update cost only what it changes (`docs/dev/performance.md`). A binding's first

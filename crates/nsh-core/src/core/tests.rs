@@ -38744,6 +38744,211 @@ mod rust_lazy_context {
     }
 }
 
+/// What a component places in a slot of its own reads the context of the
+/// component that places it, as its children and TSX's slot content do,
+/// and so the context of what is above that one (its placing component's,
+/// and the app's own around them).
+mod rust_slot_context {
+    use super::*;
+    use crate::{
+        element::{Registry, Root, Slot},
+        prelude::*,
+    };
+
+    /// What a menu gives what it places: their size.
+    #[derive(Clone)]
+    struct MenuSize(&'static str);
+
+    /// What a frame gives what is in it, however deep.
+    #[derive(Clone)]
+    struct FrameTone(&'static str);
+
+    /// What the app's own component gives what its view makes.
+    #[derive(Clone)]
+    struct AppMark(&'static str);
+
+    #[derive(Clone, PartialEq, Props)]
+    struct FrameProps {
+        children: Children,
+    }
+
+    #[component]
+    fn Frame(props: FrameProps) -> impl IntoElement {
+        provide_context(FrameTone("frame"));
+        view().child(props.children)
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct MenuProps {
+        children: Children,
+    }
+
+    /// Provides its size and places its items.
+    #[component]
+    fn Menu(props: MenuProps) -> impl IntoElement {
+        provide_context(MenuSize("sm"));
+        view().child(props.children)
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct SubMenuProps {
+        trigger: crate::element::Prop<Option<Slot>>,
+        children: Children,
+    }
+
+    /// An item of a menu: places its trigger, then its own items.
+    #[component]
+    fn SubMenu(props: SubMenuProps) -> impl IntoElement {
+        view()
+            .child(props.trigger.place(|t| t))
+            .child(props.children)
+    }
+
+    #[derive(Clone, PartialEq, Props)]
+    struct LazySubMenuProps {
+        trigger: crate::element::Prop<Option<Slot>>,
+    }
+
+    /// Places its trigger once pressed.
+    #[component]
+    fn LazySubMenu(props: LazySubMenuProps) -> impl IntoElement {
+        let open = signal(false);
+        let trigger = props.trigger;
+        view()
+            .on_press(move || open.set(true))
+            .child(when(open, move || trigger.place(|t| t)))
+    }
+
+    /// Shows what it reads: the size, the tone and the app's mark.
+    #[component]
+    fn Label() -> impl IntoElement {
+        let size = use_context::<MenuSize>().map_or("none", |s| s.0);
+        let tone = use_context::<FrameTone>().map_or("none", |t| t.0);
+        let app = use_context::<AppMark>().map_or("none", |a| a.0);
+        text(format!("{size} {tone} {app}"))
+    }
+
+    /// The tree [`js_slot_content_reads_the_same_contexts`] mounts from JS.
+    #[component]
+    fn PlainApp() -> impl IntoElement {
+        frame().child(menu().child(label()).child(sub_menu().trigger(label())))
+    }
+
+    /// Provides a size of its own too: the menu's is nearer to what it
+    /// places.
+    #[component]
+    fn MarkedApp() -> impl IntoElement {
+        provide_context(AppMark("app"));
+        provide_context(MenuSize("app"));
+        frame().child(
+            menu()
+                .child(label())
+                .child(sub_menu().trigger(label()).child(label())),
+        )
+    }
+
+    #[component]
+    fn LazyApp() -> impl IntoElement {
+        provide_context(AppMark("app"));
+        menu().child(lazy_sub_menu().trigger(label()))
+    }
+
+    fn sorted(mut texts: Vec<String>) -> Vec<String> {
+        texts.sort();
+        texts
+    }
+
+    #[test]
+    fn rust_slot_content_reads_the_context_where_it_is_placed() {
+        // The sub-menu's trigger is made by the app's view but placed by
+        // the sub-menu's, in the menu's items, in the frame: it reads the
+        // menu's size over the app's, the frame's tone and the app's mark,
+        // as the items (the menu's children) do.
+        let mut c = core();
+        c.mount_root(&Root::of::<MarkedApp>());
+        let batch = c.commit().unwrap();
+        assert_eq!(texts_of(&batch), ["sm frame app"; 3]);
+    }
+
+    #[test]
+    fn rust_slot_content_placed_later_reads_the_context_where_it_is_placed() {
+        let mut c = core();
+        c.mount_root(&Root::of::<LazyApp>());
+        let batch = c.commit().unwrap();
+        assert!(texts_of(&batch).is_empty(), "{:?}", texts_of(&batch));
+        let sub = batch
+            .items
+            .iter()
+            .find_map(|i| match i {
+                MountItem::Events { id, events } if events.contains(EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .expect("the sub-menu");
+        c.component_event(sub, EventKind::Press, &EventPayload::None);
+        let batch = c.commit().unwrap();
+        assert_eq!(texts_of(&batch), ["sm none app"]);
+    }
+
+    #[test]
+    fn js_slot_content_reads_the_same_contexts() {
+        let mut rust = core();
+        rust.mount_root(&Root::of::<PlainApp>());
+        let from_rust = sorted(texts_of(&rust.commit().unwrap()));
+        assert_eq!(from_rust, ["sm frame none"; 2]);
+
+        // The same tree in TSX: `<Frame><Menu><Label /><SubMenu
+        // trigger={<Label />} /></Menu></Frame>`.
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Frame>();
+        registry.register::<Menu>();
+        registry.register::<SubMenu>();
+        registry.register::<Label>();
+        c.set_components(registry);
+        let host = |id: NodeId, name: &str| {
+            [
+                Op::Create { id, tag: Tag::View },
+                Op::SetProp {
+                    id,
+                    prop: crate::Prop::Component(name.into()),
+                },
+            ]
+        };
+        let insert = |parent: NodeId, child: NodeId| Op::Insert {
+            parent,
+            child,
+            before: None,
+        };
+        let mut ops = Vec::new();
+        ops.extend(host(2, std::any::type_name::<Frame>()));
+        ops.extend(host(4, std::any::type_name::<Menu>()));
+        ops.extend(host(6, std::any::type_name::<Label>()));
+        ops.extend(host(8, std::any::type_name::<SubMenu>()));
+        ops.extend([
+            Op::Create {
+                id: 10,
+                tag: Tag::View,
+            },
+            Op::SetProp {
+                id: 10,
+                prop: crate::Prop::ComponentSlot("trigger".into()),
+            },
+        ]);
+        ops.extend(host(12, std::any::type_name::<Label>()));
+        ops.extend([
+            insert(10, 12),
+            insert(8, 10),
+            insert(4, 6),
+            insert(4, 8),
+            insert(2, 4),
+            insert(ROOT_ID, 2),
+        ]);
+        apply(&mut c, ops);
+        let from_js = sorted(texts_of(&c.commit().unwrap()));
+        assert_eq!(from_js, from_rust);
+    }
+}
+
 /// The tokens' `font-sans` is the font text is drawn with unless it sets
 /// its own, as a page's `--font-sans` is in Tailwind; a new one lays the
 /// text out again.
