@@ -1577,10 +1577,12 @@ export type MenuItem =
 export interface MenuModule {
   /** Sets the application menu, a submenu per top-level item (`File`,
    * `Edit`, …): macOS's menu bar, whose first menu is the app menu (titled
-   * with the app's name). On Windows and Linux the application menu belongs
-   * to the hidden app host and is not shown on the platforms' own bars in
-   * this version (per-window menu bars are not implemented; its shortcuts
-   * still work, and the app draws its own controls for the rest). Call it
+   * with the app's name). On Windows it is the menu bar of each normal
+   * window (not shown while its title bar is hidden or in full screen), and
+   * its window roles act on the window whose bar or shortcut chose them. On
+   * Linux it belongs to the hidden app host and is not shown in this
+   * version (its shortcuts still work, and the app draws its own controls
+   * for the rest). Call it
    * again to change it (in an `effect`, it follows the signals it reads);
    * `null` restores the platform's default menu. */
   setApplicationMenu(items: readonly (MenuItem | null | undefined | false)[] | null): void;

@@ -18,12 +18,13 @@ lifecycles.
 
 Not delivered in this version (recorded, not hidden):
 **per-window menu bars** on Windows and Linux (`<MenuBar>` /
-`WindowRef.setMenuBar(items)`) are not implemented; `Menu.setApplicationMenu`
-belongs to the hidden app host and is not shown on the platforms' own bars,
-so an app that needs a visible menu bar uses its own controls and shortcuts.
-**Menu roles** (Close, Minimize, Zoom) on Windows and Linux still act on the
-host's window rather than the focused window; macOS's responder chain acts on
-the key window. **GPUI** is not migrated: its host and Linux window behavior
+`WindowRef.setMenuBar(items)`) are not implemented. On Windows,
+`Menu.setApplicationMenu` is the menu bar of every normal app window, and its
+window roles (Close, Minimize, Zoom) act on the window whose bar, context menu
+or shortcut chose them (#3613). On Linux it belongs to the hidden app host and
+is not shown, so an app that needs a visible menu bar there uses its own
+controls and shortcuts, and its menu roles still act on the host's window;
+macOS's responder chain acts on the key window. **GPUI** is not migrated: its host and Linux window behavior
 follow the old model. **`windowSize()`/`pixelRatio()`** report the host
 surface and the host display, not the calling window's, except on Windows,
 Linux and macOS, where they follow the app's primary window (the first of
@@ -113,10 +114,12 @@ the main-centric lifecycle, menus and keys.
 4. Each window has its own keyboard scope. App-level shortcuts are explicit.
 5. Windows and Linux can give any window its own menu bar; macOS keeps the
    global application menu and a Window menu generated from the registry.
-   (Per-window menu bars are not implemented in this delivery.)
+   (Per-window menu bars are not implemented in this delivery; Windows shows
+   the application menu on every normal window.)
 6. Window roles, menu accelerators and focus resolve to the focused or owning
-   window, never to a hidden "main" window. (Windows and Linux roles still
-   target the host in this delivery; macOS follows the key window.)
+   window, never to a hidden "main" window. (Linux roles still target the
+   host in this delivery; macOS follows the key window, Windows the window
+   the item was chosen in.)
 7. Every app declares its windows explicitly with `<Window>`; NSH does not
    create or wrap an implicit window. Migrating an existing app is a
    major-version change.
@@ -341,7 +344,7 @@ open windows if it wants session restoration.
 - A per-window menu bar is not a macOS convention; `<MenuBar>` renders nothing
   there and apps use the application menu.
 
-### Windows and Linux (design target; not implemented in this delivery)
+### Windows and Linux (design target; Windows shows the application menu)
 
 - Every window can have its own menu bar. Declarative form:
 
@@ -364,6 +367,11 @@ open windows if it wants session restoration.
   the focused text field in that window.
 - The existing `Menu.setMenuBar(mode)` ("shown" / "autoHide") remains the
   visibility mode; the per-window items API gets a distinct name.
+- Delivered on Windows: the application menu is the native menu bar of every
+  normal window (dialogs, panels, popups and overlays have none; a hidden
+  title bar or full screen removes it), and its window roles act on the
+  window whose bar or context menu chose them, a shortcut's on the window
+  with the input. `<MenuBar>` and a per-window items API are not implemented.
 
 ## Keyboard
 
@@ -572,7 +580,8 @@ migrations are documented by the app; this page records only the NSH contract.
 - Windows native tests: the crate's unit tests ran on Windows in this
   delivery. The message-only dispatcher, N HWNDs, taskbar entries, Alt+F4,
   last-window policy, session end and second instance still need a real-host
-  Windows run; per-window menu bars are not implemented.
+  Windows run; per-window menu bars are not implemented (the application
+  menu shows on every normal window, #3613).
 - Linux native tests: 待平台验证. GtkApplication with N windows, focus and
   last-window policy need a Linux run; per-window menu bars are not
   implemented.

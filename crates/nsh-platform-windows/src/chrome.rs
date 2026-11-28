@@ -18,9 +18,13 @@
 //!   system's drag rectangle, it becomes the system's move of the window;
 //!   released before that, it reaches the app as a click, so overlays see
 //!   a press outside them and close.
-//! - **Menus** are Win32 menus: the menu bar (`SetMenu`, not shown while
-//!   the title bar is hidden) and `TrackPopupMenuEx` for context menus,
-//!   both themed dark with the app (uxtheme's `SetPreferredAppMode` for the
+//! - **Menus** are Win32 menus: the application menu is the menu bar
+//!   (`SetMenu`) of the surface's own window and of every normal window of
+//!   the app's own, each with a menu of its own, not shown while the
+//!   window's title bar is hidden or it is in full screen; the roles of an
+//!   item act on the window it was chosen in (its bar, its context menu, a
+//!   shortcut pressed in it). Bars and context menus (`TrackPopupMenuEx`)
+//!   are themed dark with the app (uxtheme's `SetPreferredAppMode` for the
 //!   menus, the `WM_UAHDRAWMENU*` messages for the bar, which has no dark
 //!   theme of its own). Their shortcuts are matched here before the keys
 //!   reach the app; the editing roles act on the focused text field by
@@ -47,7 +51,7 @@ use nsh_core::{
     Color, EventKind, EventPayload, ImageSource, PayloadValue, ROOT_ID,
     desktop::{
         DesktopCommand, Key, MenuAction, MenuItem, MenuLabels, MenuRole, Shortcut, WindowEvent,
-        WindowRequest, menu_icon,
+        WindowKind, WindowRequest, menu_icon,
     },
     geometry::{Edges, Points},
 };
@@ -129,6 +133,17 @@ struct Entry {
     role: Option<MenuRole>,
 }
 
+/// The application menu as the menu bar of one window. Each window has a
+/// menu of its own: a window destroys the menu it shows as it goes, and its
+/// icons are drawn for its DPI.
+struct Bar {
+    hwnd: HWND,
+    menu: HMENU,
+    /// What its items do, by command id - 1.
+    entries: Vec<Entry>,
+    icons: MenuIcons,
+}
+
 /// A context menu: its items and where it shows.
 pub(crate) struct Popup {
     items: Arc<[MenuItem]>,
@@ -159,12 +174,9 @@ pub(crate) struct Chrome {
     pub(crate) labels: RefCell<MenuLabels>,
     /// The application menu.
     menu: RefCell<Option<Arc<[MenuItem]>>>,
-    /// The menu bar shown (`HMENU`, 0 for none).
-    bar: Cell<isize>,
-    /// What the menu bar's items do, by command id - 1.
-    entries: RefCell<Vec<Entry>>,
-    /// The icons of the menu bar.
-    bar_icons: RefCell<MenuIcons>,
+    /// The menu bars shown: one per window that shows the application menu
+    /// ([`shows_bar`]).
+    bars: RefCell<Vec<Bar>>,
     /// The context menu to show once the batch is applied.
     popup: RefCell<Option<Popup>>,
     /// The last context-menu request, consumed by the app's next popup.
@@ -371,9 +383,7 @@ pub(crate) fn frame_changed(surface: &Surface, hwnd: HWND) {
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         )
     };
-    if crate::window::app_window_root(hwnd).is_none() {
-        show_menu_bar(surface);
-    }
+    update_bar(surface, hwnd);
     update_area(surface, hwnd);
     crate::window::invalidate(hwnd);
     surface.invalidate();
@@ -443,13 +453,10 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
         }
         // The Win32 menu bar always shows.
         DesktopCommand::SetMenuBar(_) => {}
-        // The edit menus read them as they open, a top-level window's menu
-        // bar now.
+        // The edit menus read them as they open, the menu bars now.
         DesktopCommand::SetMenuLabels(labels) => {
             c.labels.replace((**labels).clone());
-            if top_level(hwnd) {
-                show_menu_bar(surface);
-            }
+            show_menu_bar(surface);
         }
         DesktopCommand::PopupMenu { items, at } => {
             let hwnd = surface.hwnd();
@@ -644,9 +651,7 @@ fn toggle_maximize(hwnd: HWND) {
 /// Window `hwnd` entered or left full screen: the menu bar and the title
 /// bar's area follow (neither shows in full screen).
 pub(crate) fn full_screen_changed(surface: &Surface, hwnd: HWND) {
-    if crate::window::app_window_root(hwnd).is_none() {
-        show_menu_bar(surface);
-    }
+    update_bar(surface, hwnd);
     update_area(surface, hwnd);
     crate::window::invalidate(hwnd);
     surface.invalidate();
@@ -1788,9 +1793,7 @@ pub(crate) fn nc_activate(
     if !custom_caption(hwnd) {
         // SAFETY: default handling, then the dark menu bar's line.
         let r = unsafe { DefWindowProcW(hwnd, WM_NCACTIVATE, wparam, lparam) };
-        if crate::window::app_window_root(hwnd).is_none() {
-            paint_menu_bar_line(surface, hwnd);
-        }
+        paint_menu_bar_line(surface, hwnd);
         return Some(r);
     }
     // SAFETY: default handling, told not to repaint the frame.
@@ -2173,15 +2176,16 @@ fn icon_bitmap(
     }
 }
 
-/// Loads the icons of `pending`, setting each on its item as it arrives (at
-/// once when in memory, as [`show_popup`]'s are) and keeping its bitmap in
-/// `bitmaps`. A load never outlives its menu: its owner gives it up first.
+/// Loads the icons of `pending` at window `hwnd`'s DPI, setting each on its
+/// item as it arrives (at once when in memory, as [`show_popup`]'s are) and
+/// keeping its bitmap in `bitmaps`. A load never outlives its menu: its
+/// owner gives it up first.
 fn load_icons(
     surface: &Surface,
+    hwnd: HWND,
     pending: Vec<PendingIcon>,
     bitmaps: &Rc<RefCell<IconBitmaps>>,
 ) -> Vec<crate::image::Load> {
-    let hwnd = surface.hwnd();
     let (side, scale) = icon_size(hwnd);
     let dark = crate::system::dark(surface);
     pending
@@ -2302,20 +2306,60 @@ fn append(
     }
 }
 
-/// Shows the application menu as the window's menu bar, unless the title
-/// bar is hidden or the window is in full screen.
+/// Whether window `hwnd` shows the application menu as its menu bar: the
+/// surface's own top-level window and the app's normal windows (not its
+/// dialogs, panels, popups or overlays), unless the title bar is the app's
+/// or the window is in full screen.
+fn shows_bar(surface: &Surface, hwnd: HWND) -> bool {
+    let eligible = if hwnd == surface.hwnd() {
+        top_level(hwnd)
+    } else {
+        crate::window::app_window_root(hwnd).is_some()
+            && crate::window::shell(hwnd).is_some_and(|s| s.kind.get() == WindowKind::Normal)
+    };
+    eligible && !custom_caption(hwnd) && !crate::window::is_full_screen(hwnd)
+}
+
+/// Shows the application menu as the menu bar of every window that shows
+/// it ([`shows_bar`]).
 fn show_menu_bar(surface: &Surface) {
-    let hwnd = surface.hwnd();
+    let mut windows = crate::app_window::hwnds(surface);
+    let host = surface.hwnd();
+    if !host.is_invalid() {
+        windows.insert(0, host);
+    }
+    for hwnd in windows {
+        update_bar(surface, hwnd);
+    }
+}
+
+/// Gives window `hwnd` the application menu as its menu bar, made anew, or
+/// takes its bar away when it shows none ([`shows_bar`]).
+fn update_bar(surface: &Surface, hwnd: HWND) {
     let c = &surface.chrome;
-    let menu = c.menu.borrow().clone();
-    let shown = menu.filter(|_| !custom_caption(hwnd) && !crate::window::is_full_screen(hwnd));
+    let shown = c.menu.borrow().clone().filter(|_| shows_bar(surface, hwnd));
+    // Taken out before the window hears of the change: the messages that
+    // `SetMenu` and `DrawMenuBar` send read the bars.
+    let mut old = take_bar(surface, hwnd);
+    if old.is_none() && shown.is_none() {
+        return;
+    }
+    // The old bar's loads end now: they set items of a menu about to go.
+    if let Some(old) = &mut old {
+        old.icons.loads.clear();
+    }
+    // Windows keeps the outer size of a window whose bar comes or goes: a
+    // window of the app's own that does not show yet keeps the content size
+    // it opens with instead.
+    // SAFETY: a plain query.
+    let keep = (crate::window::app_window_root(hwnd).is_some()
+        && !unsafe { IsWindowVisible(hwnd) }.as_bool())
+    .then(|| client_rect(hwnd));
     let mut entries = Vec::new();
     let mut icons = Vec::new();
-    // The old bar's loads end now: they set items of a menu about to go.
-    c.bar_icons.borrow_mut().loads.clear();
     // SAFETY: menus made, set and destroyed on this thread; the old bar is
     // destroyed once the window no longer shows it, then its bitmaps freed.
-    unsafe {
+    let bar = unsafe {
         let bar = match &shown {
             Some(items) => CreateMenu().ok().inspect(|bar| {
                 let labels = c.labels.borrow();
@@ -2325,54 +2369,92 @@ fn show_menu_bar(surface: &Surface) {
         };
         theme_menus(crate::system::dark(surface));
         let _ = SetMenu(hwnd, bar);
-        let old = c.bar.replace(bar.map_or(0, |b| b.0 as isize));
-        if old != 0 {
-            let _ = DestroyMenu(HMENU(old as *mut _));
+        if let Some(old) = &old {
+            let _ = DestroyMenu(old.menu);
         }
         let _ = DrawMenuBar(hwnd);
-    }
-    let bitmaps = Rc::default();
-    let loads = load_icons(surface, icons, &bitmaps);
-    *c.bar_icons.borrow_mut() = MenuIcons {
-        loads,
-        _bitmaps: bitmaps,
+        bar
     };
-    // The bar's entries; the shortcuts are matched on the whole menu.
-    *c.entries.borrow_mut() = entries;
+    drop(old);
+    if let Some(menu) = bar {
+        let bitmaps = Rc::default();
+        let loads = load_icons(surface, hwnd, icons, &bitmaps);
+        c.bars.borrow_mut().push(Bar {
+            hwnd,
+            menu,
+            entries,
+            icons: MenuIcons {
+                loads,
+                _bitmaps: bitmaps,
+            },
+        });
+    }
+    if let Some(rect) = keep {
+        let now = client_rect(hwnd);
+        if now.bottom - now.top != rect.bottom - rect.top {
+            crate::window::fit_content(hwnd, (rect.right - rect.left, rect.bottom - rect.top));
+        }
+    }
 }
 
-/// `WM_COMMAND` from the menu bar.
-pub(crate) fn menu_command(surface: &Rc<Surface>, command: u16) {
+/// Takes window `hwnd`'s bar out of the surface's.
+fn take_bar(surface: &Surface, hwnd: HWND) -> Option<Bar> {
+    let mut bars = surface.chrome.bars.borrow_mut();
+    let i = bars.iter().position(|b| b.hwnd == hwnd)?;
+    Some(bars.remove(i))
+}
+
+/// Window `hwnd` is being destroyed (`WM_DESTROY`): its menu bar goes
+/// with it, destroyed here, not by the system, so that no bar is left
+/// naming a menu that is gone.
+pub(crate) fn window_destroyed(surface: &Surface, hwnd: HWND) {
+    let Some(mut bar) = take_bar(surface, hwnd) else {
+        return;
+    };
+    bar.icons.loads.clear();
+    // SAFETY: the window, still alive while it handles `WM_DESTROY`, lets go
+    // of the menu, which this thread made.
+    unsafe {
+        let _ = SetMenu(hwnd, None);
+        let _ = DestroyMenu(bar.menu);
+    }
+}
+
+/// `WM_COMMAND` from the menu bar of window `hwnd`: its role acts on that
+/// window.
+pub(crate) fn menu_command(surface: &Rc<Surface>, hwnd: HWND, command: u16) {
     let entry = surface
         .chrome
-        .entries
+        .bars
         .borrow()
-        .get((command as usize).wrapping_sub(1))
-        .copied();
+        .iter()
+        .find(|b| b.hwnd == hwnd)
+        .and_then(|b| b.entries.get((command as usize).wrapping_sub(1)).copied());
     if let Some(entry) = entry {
-        choose(surface, entry.id, entry.role, None);
+        choose(surface, hwnd, entry.id, entry.role, None);
     }
 }
 
-/// An item was chosen: the platform carries out its role, the app hears
-/// about the rest.
-fn choose(surface: &Rc<Surface>, id: u32, role: Option<MenuRole>, area: Option<&NshView>) {
-    let hwnd = surface.hwnd();
+/// An item was chosen in window `hwnd` (its menu bar, a context menu it
+/// showed, a shortcut pressed in it): the platform carries out its role on
+/// that window, the app hears about the rest.
+fn choose(
+    surface: &Rc<Surface>,
+    hwnd: HWND,
+    id: u32,
+    role: Option<MenuRole>,
+    area: Option<&NshView>,
+) {
+    let host = surface.hwnd();
     match role {
         // An embedding app's window is its own to close or keep.
-        Some(MenuRole::Quit) if top_level(hwnd) => {
+        Some(MenuRole::Quit) if top_level(host) => {
             if !ask_quit(surface) {
                 quit(surface);
             }
         }
-        Some(MenuRole::Quit | MenuRole::Close) => {
-            // As the window menu's Close: the app hears a close press.
-            if let Some(shell) = crate::window::shell(hwnd) {
-                shell.close_command.set(Some(crate::shell::SysClose::Menu));
-            }
-            // SAFETY: posting to a live window.
-            let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
-        }
+        Some(MenuRole::Quit) => close_by_menu(host),
+        Some(MenuRole::Close) => close_by_menu(hwnd),
         Some(MenuRole::Minimize | MenuRole::Hide) => {
             // SAFETY: a plain call.
             let _ = unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
@@ -2383,7 +2465,9 @@ fn choose(surface: &Rc<Surface>, id: u32, role: Option<MenuRole>, area: Option<&
         Some(role)
             if area.is_some_and(|area| crate::selectable_view::menu_role(surface, area, role)) => {}
         Some(role) if role.edits_text() => {
-            // The focused field's own keys.
+            // The focused field's own keys, in the window's own tree.
+            let _root = crate::window::app_window_root(hwnd)
+                .and_then(|id| crate::app_window::enter(surface, id));
             let (vk, shift) = match role {
                 MenuRole::Undo => (0x5A, false),
                 MenuRole::Redo => (0x59, false),
@@ -2421,6 +2505,16 @@ fn choose(surface: &Rc<Surface>, id: u32, role: Option<MenuRole>, area: Option<&
     }
 }
 
+/// Closes window `hwnd` as the window menu's Close does: the app hears a
+/// close press.
+fn close_by_menu(hwnd: HWND) {
+    if let Some(shell) = crate::window::shell(hwnd) {
+        shell.close_command.set(Some(crate::shell::SysClose::Menu));
+    }
+    // SAFETY: posting to a window by handle; a window gone ignores it.
+    let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+}
+
 /// `WM_NSH_MENU`: shows the context menu asked for.
 pub(crate) fn show_popup(surface: &Rc<Surface>, hwnd: HWND) {
     let Some(Popup {
@@ -2450,7 +2544,7 @@ pub(crate) fn show_popup(surface: &Rc<Surface>, hwnd: HWND) {
         );
         // What loaded in time is in memory, on the items now; what did not
         // goes on them while the menu is open.
-        let loads = load_icons(surface, icons, &bitmaps);
+        let loads = load_icons(surface, hwnd, icons, &bitmaps);
         surface.chrome.popup_icons.borrow_mut().clear();
         let mut p = POINT::default();
         match at {
@@ -2496,13 +2590,13 @@ pub(crate) fn show_popup(surface: &Rc<Surface>, hwnd: HWND) {
     {
         surface.chrome.tracked_popup.borrow_mut().take();
         if let Some((id, role)) = surface.chrome.test_choice.take() {
-            choose(surface, id, role, area.as_ref());
+            choose(surface, hwnd, id, role, area.as_ref());
         }
     }
     if let Some(entry) = entries.get(chosen.wrapping_sub(1)).copied() {
         match actions.get((entry.id as usize).wrapping_sub(1)) {
             Some(action) => action(surface),
-            None => choose(surface, entry.id, entry.role, area.as_ref()),
+            None => choose(surface, hwnd, entry.id, entry.role, area.as_ref()),
         }
     }
     // The app's `Menu.popup` promise settles.
@@ -2557,7 +2651,8 @@ pub(crate) fn shortcut_key(vk: u16) -> Option<Key> {
 }
 
 /// A key pressed: the application menu's item with that shortcut is
-/// chosen (true), before the app gets the key.
+/// chosen (true), before the app gets the key; its role acts on the window
+/// the key was pressed in.
 pub(crate) fn shortcut(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
     let Some(key) = shortcut_key(event.vk) else {
         return false;
@@ -2582,7 +2677,8 @@ pub(crate) fn shortcut(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
     };
     match found {
         Some((id, role)) => {
-            choose(surface, id, role, None);
+            let hwnd = crate::app_window::hwnd_showing(surface, &surface.input_root());
+            choose(surface, hwnd, id, role, None);
             true
         }
         None => false,
@@ -2600,6 +2696,12 @@ const BAR_DARK: u32 = 0x002b_2b2b;
 const BAR_HOT: u32 = 0x0041_4141;
 const BAR_TEXT: u32 = 0x00ff_ffff;
 const BAR_TEXT_DISABLED: u32 = 0x0080_8080;
+
+/// Whether window `hwnd` shows a menu bar.
+fn has_menu_bar(hwnd: HWND) -> bool {
+    // SAFETY: a plain query.
+    !unsafe { GetMenu(hwnd) }.is_invalid()
+}
 
 /// The menu bar's rectangle in the window's coordinates.
 fn menu_bar_rect(hwnd: HWND) -> Option<RECT> {
@@ -2630,7 +2732,7 @@ pub(crate) fn draw_menu_bar(
     msg: u32,
     lparam: LPARAM,
 ) -> Option<LRESULT> {
-    if !crate::system::dark(surface) || surface.chrome.bar.get() == 0 {
+    if !crate::system::dark(surface) || !has_menu_bar(hwnd) {
         return None;
     }
     match msg {
@@ -2694,7 +2796,7 @@ pub(crate) fn draw_menu_bar(
 /// Paints over the light line the system draws under the menu bar (after
 /// `WM_NCPAINT` and `WM_NCACTIVATE`), in the dark theme.
 pub(crate) fn paint_menu_bar_line(surface: &Surface, hwnd: HWND) {
-    if !crate::system::dark(surface) || surface.chrome.bar.get() == 0 {
+    if !crate::system::dark(surface) || !has_menu_bar(hwnd) {
         return;
     }
     let Some(bar) = menu_bar_rect(hwnd) else {
@@ -2718,32 +2820,45 @@ pub(crate) fn paint_menu_bar_line(surface: &Surface, hwnd: HWND) {
     }
 }
 
-/// Makes the menu bar again if it has icons: they are drawn for one DPI and
-/// theme.
-fn refresh_icons(surface: &Surface) {
-    let has_icons = surface.chrome.menu.borrow().as_ref().is_some_and(|menu| {
+/// Whether the application menu has icons: they are drawn for one DPI and
+/// theme, and the bars showing them are made again when those change.
+fn menu_has_icons(surface: &Surface) -> bool {
+    surface.chrome.menu.borrow().as_ref().is_some_and(|menu| {
         let mut any = false;
         MenuItem::each_icon(menu, &mut |_| any = true);
         any
-    });
-    if has_icons && surface.chrome.bar.get() != 0 {
-        show_menu_bar(surface);
+    })
+}
+
+/// The windows showing a menu bar.
+pub(crate) fn bar_windows(surface: &Surface) -> Vec<HWND> {
+    surface
+        .chrome
+        .bars
+        .borrow()
+        .iter()
+        .map(|b| b.hwnd)
+        .collect()
+}
+
+/// Window `hwnd` moved to a screen of another DPI: its bar's icons follow.
+pub(crate) fn dpi_changed(surface: &Surface, hwnd: HWND) {
+    if menu_has_icons(surface) && bar_windows(surface).contains(&hwnd) {
+        update_bar(surface, hwnd);
     }
 }
 
-/// The window moved to a screen of another DPI: the bar's icons follow.
-pub(crate) fn dpi_changed(surface: &Surface) {
-    refresh_icons(surface);
-}
-
-/// The appearance changed: menus and the bar follow it.
+/// The appearance changed: menus and the bars follow it.
 pub(crate) fn appearance_changed(surface: &Surface) {
     theme_menus(crate::system::dark(surface));
-    refresh_icons(surface);
-    let hwnd = surface.hwnd();
-    if surface.chrome.bar.get() != 0 && !hwnd.is_invalid() {
-        // SAFETY: a plain call.
-        let _ = unsafe { DrawMenuBar(hwnd) };
+    let icons = menu_has_icons(surface);
+    for hwnd in bar_windows(surface) {
+        if icons {
+            update_bar(surface, hwnd);
+        } else {
+            // SAFETY: a plain call on a window showing a bar.
+            let _ = unsafe { DrawMenuBar(hwnd) };
+        }
     }
     surface.invalidate();
 }
@@ -2914,6 +3029,16 @@ mod tests {
         (area, text)
     }
 
+    /// A menu bar of the surface's window whose one item is `entry`.
+    fn bar_of(surface: &Surface, entry: Entry) {
+        surface.chrome.bars.borrow_mut().push(Bar {
+            hwnd: surface.hwnd(),
+            menu: HMENU::default(),
+            entries: vec![entry],
+            icons: MenuIcons::default(),
+        });
+    }
+
     fn selection(text: &NshView) -> Option<(u32, u32)> {
         text.state().text.as_ref().unwrap().area_range.get()
     }
@@ -2934,13 +3059,25 @@ mod tests {
         let (_, text) = selectable_text(&surface);
         assert!(crate::input::show_context_menu(&surface, &text));
         let popup = surface.chrome.app_popup(Arc::from([]), None);
-        choose(&surface, 0, Some(MenuRole::SelectAll), popup.area.as_ref());
+        choose(
+            &surface,
+            surface.hwnd(),
+            0,
+            Some(MenuRole::SelectAll),
+            popup.area.as_ref(),
+        );
         assert_eq!(selection(&text), Some((0, 13)));
         crate::selectable_view::clear();
 
         // The request was consumed even if the popup was cancelled.
         let popup = surface.chrome.app_popup(Arc::from([]), None);
-        choose(&surface, 0, Some(MenuRole::SelectAll), popup.area.as_ref());
+        choose(
+            &surface,
+            surface.hwnd(),
+            0,
+            Some(MenuRole::SelectAll),
+            popup.area.as_ref(),
+        );
         assert_eq!(selection(&text), None);
     }
 
@@ -2948,12 +3085,15 @@ mod tests {
     fn an_unopened_context_menu_cannot_take_over_bar_roles() {
         let surface = Surface::new(Environment::default());
         let (_, text) = selectable_text(&surface);
-        surface.chrome.entries.borrow_mut().push(Entry {
-            id: 0,
-            role: Some(MenuRole::SelectAll),
-        });
+        bar_of(
+            &surface,
+            Entry {
+                id: 0,
+                role: Some(MenuRole::SelectAll),
+            },
+        );
         assert!(crate::input::show_context_menu(&surface, &text));
-        menu_command(&surface, 1);
+        menu_command(&surface, surface.hwnd(), 1);
         assert_eq!(selection(&text), None);
     }
 
@@ -2980,7 +3120,13 @@ mod tests {
                 },
             );
             let popup = surface.chrome.app_popup(Arc::from([]), None);
-            choose(&surface, 0, Some(MenuRole::SelectAll), popup.area.as_ref());
+            choose(
+                &surface,
+                surface.hwnd(),
+                0,
+                Some(MenuRole::SelectAll),
+                popup.area.as_ref(),
+            );
             assert_eq!(
                 selection(&text),
                 if vk == 0x10 { Some((0, 13)) } else { None }
@@ -2999,7 +3145,13 @@ mod tests {
         button.insert_before(&surface.root, None);
         assert!(crate::access::activate(&surface, &button));
         let popup = surface.chrome.app_popup(Arc::from([]), None);
-        choose(&surface, 0, Some(MenuRole::SelectAll), popup.area.as_ref());
+        choose(
+            &surface,
+            surface.hwnd(),
+            0,
+            Some(MenuRole::SelectAll),
+            popup.area.as_ref(),
+        );
         assert_eq!(selection(&text), None);
     }
 
@@ -3008,14 +3160,16 @@ mod tests {
         let surface = Surface::new(Environment::default());
         let (_, text) = selectable_text(&surface);
         assert!(crate::input::show_context_menu(&surface, &text));
-        surface
-            .chrome
-            .entries
-            .borrow_mut()
-            .push(Entry { id: 7, role: None });
-        menu_command(&surface, 1);
+        bar_of(&surface, Entry { id: 7, role: None });
+        menu_command(&surface, surface.hwnd(), 1);
         let popup = surface.chrome.app_popup(Arc::from([]), None);
-        choose(&surface, 0, Some(MenuRole::SelectAll), popup.area.as_ref());
+        choose(
+            &surface,
+            surface.hwnd(),
+            0,
+            Some(MenuRole::SelectAll),
+            popup.area.as_ref(),
+        );
         assert_eq!(selection(&text), None);
     }
 
@@ -3026,7 +3180,13 @@ mod tests {
         assert!(crate::input::show_context_menu(&first, &text));
         let second = Surface::new(Environment::default());
         let popup = second.chrome.app_popup(Arc::from([]), None);
-        choose(&second, 0, Some(MenuRole::SelectAll), popup.area.as_ref());
+        choose(
+            &second,
+            second.hwnd(),
+            0,
+            Some(MenuRole::SelectAll),
+            popup.area.as_ref(),
+        );
         assert_eq!(selection(&text), None);
     }
 

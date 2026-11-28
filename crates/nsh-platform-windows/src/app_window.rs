@@ -1011,6 +1011,7 @@ pub(crate) fn handle(
             if let Some(window) = &window {
                 resized(surface, window);
             }
+            crate::chrome::dpi_changed(surface, hwnd);
             Some(Some(LRESULT(0)))
         }
         crate::window::WM_NSH_SHOW => {
@@ -1044,8 +1045,22 @@ pub(crate) fn handle(
             crate::chrome::show_popup(surface, hwnd);
             Some(Some(LRESULT(0)))
         }
-        // The main window's: its menu bar, lifecycle and engine.
-        WM_NCPAINT | 0x0091 | 0x0092 | WM_COMMAND | WM_DESTROY => Some(None),
+        // Its menu bar (the application menu's): drawn dark with the app,
+        // its items acting on this window.
+        WM_NCPAINT => {
+            // SAFETY: default handling, then the dark menu bar's line.
+            let r = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            crate::chrome::paint_menu_bar_line(surface, hwnd);
+            Some(Some(r))
+        }
+        // `WM_UAHDRAWMENU`, `WM_UAHDRAWMENUITEM`.
+        0x0091 | 0x0092 => Some(crate::chrome::draw_menu_bar(surface, hwnd, msg, lparam)),
+        WM_COMMAND if (wparam.0 >> 16) & 0xFFFF == 0 && lparam.0 == 0 => {
+            crate::chrome::menu_command(surface, hwnd, (wparam.0 & 0xFFFF) as u16);
+            Some(Some(LRESULT(0)))
+        }
+        // The system's handling (its bar goes in `crate::window`'s).
+        WM_COMMAND | WM_DESTROY => Some(None),
         m if m >= WM_APP => Some(None),
         _ => None,
     }
@@ -1751,5 +1766,170 @@ mod tests {
             vec![2, 3],
             "closing viewer must preserve the two unrelated live windows"
         );
+    }
+
+    /// The application menu of `surface`: a File menu whose one item is
+    /// Close, with Ctrl+W.
+    fn set_file_menu(surface: &Rc<Surface>) {
+        use nsh_core::{
+            desktop::{Key, MenuAction, MenuItem, MenuRole, Shortcut},
+            keymap::When,
+        };
+        let close = MenuItem::Action(MenuAction {
+            id: 0,
+            label: String::new(),
+            shortcut: Some(Shortcut {
+                ctrl: true,
+                ..Shortcut::key(Key::Char('w'))
+            }),
+            enabled: true,
+            checked: None,
+            role: Some(MenuRole::Close),
+            when: When::Auto,
+            icon: None,
+            symbol: None,
+            destructive: false,
+        });
+        let file = MenuItem::Submenu {
+            label: "File".into(),
+            enabled: true,
+            items: vec![close],
+            icon: None,
+            symbol: None,
+            inline: false,
+        };
+        crate::chrome::command(surface, &DesktopCommand::SetMenu(Some(vec![file].into())));
+    }
+
+    /// The menu bar `hwnd` shows (null for none).
+    fn menu_bar(hwnd: HWND) -> HMENU {
+        // SAFETY: a plain query.
+        unsafe { GetMenu(hwnd) }
+    }
+
+    /// Whether a `WM_CLOSE` waits in `hwnd`'s queue (taken out of it).
+    fn close_posted(hwnd: HWND) -> bool {
+        let mut msg = MSG::default();
+        // SAFETY: a query of this thread's queue with a local out value.
+        unsafe { PeekMessageW(&mut msg, Some(hwnd), WM_CLOSE, WM_CLOSE, PM_REMOVE) }.as_bool()
+    }
+
+    /// The application menu is the menu bar of every normal window of the
+    /// app's own (#3613), not only of the hidden host: windows that open
+    /// later get it, each a menu of its own, dialogs none, and a window whose
+    /// title bar is the app's none while it is.
+    #[test]
+    fn the_application_menu_is_the_bar_of_every_normal_window() {
+        use nsh_core::MountItem;
+        let app = crate::app::AppView::new(None, Default::default()).unwrap();
+        let surface = app.surface();
+        let first = open_test_window(surface, 2, None);
+        let dialog = open_test_window(surface, 3, Some(2));
+        let content = client_pixels(first);
+        set_file_menu(surface);
+        assert!(!menu_bar(first).is_invalid(), "a normal window shows it");
+        assert!(menu_bar(dialog).is_invalid(), "a dialog shows none");
+        assert_eq!(
+            client_pixels(first),
+            content,
+            "a window not shown yet keeps the content size it opens with"
+        );
+
+        // Opened after the menu was set.
+        let second = open_test_window(surface, 4, None);
+        assert!(!menu_bar(second).is_invalid(), "a window opening shows it");
+        assert_ne!(menu_bar(first), menu_bar(second), "each its own menu");
+
+        // A title bar of the app's own has no menu bar; the system's again
+        // shows it.
+        let titled = |style| {
+            let mut title_bar = TitleBarOptions::default();
+            title_bar.style = style;
+            let mut diff = WindowAttributes::default();
+            diff.title_bar = Some(title_bar);
+            crate::shell::apply(surface, first, &diff);
+        };
+        titled(TitleBarStyle::Hidden);
+        assert!(menu_bar(first).is_invalid(), "hidden title bar");
+        titled(TitleBarStyle::Default);
+        assert!(!menu_bar(first).is_invalid(), "system title bar");
+
+        // A window that goes takes its bar with it.
+        {
+            let mut m = surface.mounter.borrow_mut();
+            m.apply(surface, &MountItem::Remove { id: 4 });
+            m.end_batch(surface);
+        }
+        // SAFETY: a plain query of the test's window just destroyed.
+        assert!(!unsafe { IsWindow(Some(second)) }.as_bool());
+        assert!(!crate::chrome::bar_windows(surface).contains(&second));
+        assert!(!menu_bar(first).is_invalid(), "the others keep theirs");
+
+        // No menu: no bar anywhere.
+        crate::chrome::command(surface, &DesktopCommand::SetMenu(None));
+        assert!(menu_bar(first).is_invalid());
+        assert!(crate::chrome::bar_windows(surface).is_empty());
+
+        close_all(surface);
+        // SAFETY: the test app host window.
+        let _ = unsafe { DestroyWindow(app.hwnd()) };
+    }
+
+    /// A role of the application menu acts on the window it was chosen in
+    /// (#3613): its bar's Close closes that window, its shortcut the window
+    /// the key was pressed in, never the hidden host.
+    #[test]
+    fn a_menu_role_acts_on_the_window_it_is_chosen_in() {
+        use crate::input::Modifiers;
+        let app = crate::app::AppView::new(None, Default::default()).unwrap();
+        let surface = app.surface();
+        let host = app.hwnd();
+        let first = open_test_window(surface, 2, None);
+        let second = open_test_window(surface, 3, None);
+        set_file_menu(surface);
+        for hwnd in [host, first, second] {
+            close_posted(hwnd);
+        }
+
+        // File > Close in the second window's bar (its first command).
+        // SAFETY: sent to the test's own window, on its thread.
+        unsafe { SendMessageW(second, WM_COMMAND, Some(WPARAM(1)), Some(LPARAM(0))) };
+        assert!(close_posted(second), "the window whose bar it is closes");
+        assert!(!close_posted(first));
+        assert!(!close_posted(host), "not the hidden host");
+        assert_eq!(
+            crate::window::shell(second).unwrap().close_command.take(),
+            Some(crate::shell::SysClose::Menu),
+            "the app hears a close press from the menu"
+        );
+
+        // Ctrl+W pressed in the first window.
+        {
+            let _root = enter(surface, 2).unwrap();
+            let ctrl_w = KeyEvent {
+                vk: 0x57,
+                down: true,
+                repeat: false,
+                modifiers: Modifiers {
+                    ctrl: true,
+                    ..Default::default()
+                },
+                scan: 0,
+                extended: false,
+                sys: false,
+                translated: false,
+            };
+            assert!(crate::chrome::shortcut(surface, &ctrl_w));
+        }
+        assert!(
+            close_posted(first),
+            "the window the key was pressed in closes"
+        );
+        assert!(!close_posted(second));
+        assert!(!close_posted(host), "not the hidden host");
+
+        close_all(surface);
+        // SAFETY: the test app host window.
+        let _ = unsafe { DestroyWindow(app.hwnd()) };
     }
 }

@@ -1571,10 +1571,11 @@ fn desktop_os() -> bool {
 /// Sets the application menu, a submenu per top-level item (`File`,
 /// `Edit`, ...), or with `None` restores the platform's default (TS:
 /// `Menu.setApplicationMenu`). On macOS it is the menu bar, whose first
-/// menu is the app menu (titled with the app's name); on Windows and Linux
-/// the window's menu bar, not shown while the title bar is hidden (its
-/// shortcuts still work: a title bar of the app's own shows its menus with
-/// [`popup_menu`]). Call it again to change it; in an [`effect`] it follows
+/// menu is the app menu (titled with the app's name); on Windows the menu
+/// bar of each normal [`window`], not shown while its title bar is hidden
+/// (its shortcuts still work: a title bar of the app's own shows its menus
+/// with [`popup_menu`]), whose window roles act on that window. Linux does
+/// not show it yet: it belongs to the hidden app host. Call it again to change it; in an [`effect`] it follows
 /// the signals it reads. The items' handlers run while the current owner
 /// lives: the menu stays after it, inert, until it is set again.
 ///

@@ -1332,6 +1332,10 @@ fn handle(
             return Some(DefWindowProcW(hwnd, original, wparam, lparam));
         }
     }
+    // The window's menu bar goes with it, whichever window it is.
+    if msg == WM_DESTROY {
+        crate::chrome::window_destroyed(surface, hwnd);
+    }
     // What the app's window API asks of a top-level window: its limits,
     // policies and state.
     if (data.top_level || data.window.is_some())
@@ -1411,7 +1415,7 @@ fn handle(
         // `WM_UAHDRAWMENU`, `WM_UAHDRAWMENUITEM`: the menu bar.
         0x0091 | 0x0092 => return crate::chrome::draw_menu_bar(surface, hwnd, msg, lparam),
         WM_COMMAND if (wparam.0 >> 16) & 0xFFFF == 0 && lparam.0 == 0 => {
-            crate::chrome::menu_command(surface, (wparam.0 & 0xFFFF) as u16);
+            crate::chrome::menu_command(surface, hwnd, (wparam.0 & 0xFFFF) as u16);
             return Some(LRESULT(0));
         }
         WM_NSH_PAINT => {
@@ -1467,7 +1471,7 @@ fn handle(
                 };
             }
             sync_size(surface, hwnd);
-            crate::chrome::dpi_changed(surface);
+            crate::chrome::dpi_changed(surface, hwnd);
             crate::tray::refresh(hwnd);
             crate::window_state::displays_changed(surface);
         }

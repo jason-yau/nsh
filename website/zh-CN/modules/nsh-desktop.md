@@ -877,7 +877,7 @@ const Menu: {
 
 | 成员 | 说明 |
 |---|---|
-| `setApplicationMenu(items)` | 设置应用菜单：每个顶层项是一个子菜单（`File`、`Edit`……）。在 macOS 上是菜单栏，第一个菜单是应用菜单（AppKit 以应用名作为标题）。窗口模型 v2 尚未在 Windows 和 Linux 上显示它（那里本应是窗口的菜单栏）：菜单发往应用宿主，因此请绘制应用自己的控件（用 `⋯` 按钮打开 `Menu.popup`），并用 `keymap` 绑定它们的快捷键。`null` 恢复平台默认菜单。 |
+| `setApplicationMenu(items)` | 设置应用菜单：每个顶层项是一个子菜单（`File`、`Edit`……）。在 macOS 上是菜单栏，第一个菜单是应用菜单（AppKit 以应用名作为标题）。在 Windows 上是每个普通窗口的菜单栏（对话框、面板、弹出窗口和浮层窗口没有），窗口隐藏标题栏或处于全屏时不显示；`close` 等窗口角色作用于使用了其菜单或快捷键的那个窗口。窗口模型 v2 尚未在 Linux 上显示它：菜单发往应用宿主，因此请绘制应用自己的控件（用 `⋯` 按钮打开 `Menu.popup`），并用 `keymap` 绑定它们的快捷键。`null` 恢复平台默认菜单。 |
 | `setMenuBar(mode)` | 在 GPUI 应用的 Windows 和 Linux 上，窗口把应用菜单绘制成应用上方的菜单栏：`"shown"`（默认）始终显示；`"autoHide"` 在单独按下并松开 Alt 后显示，再次单独按 Alt 时隐藏，与 Windows 和 GNOME 应用一致。两种模式下 F10 和 Alt 加菜单首字母都会打开菜单，菜单打开期间菜单栏显示。macOS 的菜单栏是系统的。Rust：`set_menu_bar(mode)`。 |
 | `popup(items, at?)` | 显示右键菜单，左上角在 `at`（窗口坐标，单位为点：`onContextMenu` 的 `e.pagePosition`），省略时在指针处。菜单关闭时（无论是否选中了菜单项）返回的 Promise 会 resolve：打开它的按钮可以在此之前一直保持按下样式。 |
 
