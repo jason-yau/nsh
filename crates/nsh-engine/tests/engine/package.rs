@@ -232,3 +232,88 @@ fn bytecode_files_are_refused_by_read() {
     assert!(nsh_engine::Bundle::read(&dir.join("bundle.js")).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An app that shows what `appInfo()` reports.
+const APP_INFO_APP: &str = r#"
+import { appInfo, mount, Text } from "nsh";
+
+function App() {
+  const app = appInfo();
+  return <Text>{`${app.id}|${app.name}|${app.version}|${app.build}|${app.development}`}</Text>;
+}
+
+mount(App);
+"#;
+
+/// A bundle signed again under a new header (a host rolling back to an
+/// earlier release with `nsh_package::build`) reports the header's app, the
+/// release the device verified and enforces, not the app info it was built
+/// with; the same bundle run as a plain bundle keeps its own.
+#[test]
+fn a_verified_package_reports_its_headers_app_info() {
+    let dir = std::env::temp_dir().join(format!("nsh-package-app-info-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("App.tsx"), APP_INFO_APP).unwrap();
+    let mut built = nsh_bundler::AppInfo::default();
+    built.id = Some("com.example.built".into());
+    built.name = Some("Built".into());
+    built.version = Some("1.0.0".into());
+    built.build = Some(1);
+    let bundle = nsh_bundler::bundle(&nsh_bundler::BundleOptions {
+        entry: dir.join("App.tsx"),
+        minify: true,
+        split: false,
+        app: built,
+        ui_sets: vec![nsh_base::registry().into()],
+        ..Default::default()
+    })
+    .unwrap();
+    let bytecode = nsh_js::compile_bytecode(&bundle.code, true).unwrap();
+
+    // The bundle alone (a plain bundle, the dev server's) reports the build's.
+    let plain = nsh_engine::Bundle::source(bundle.code.clone());
+    assert!(
+        first_texts(plain).contains(&"com.example.built|Built|1.0.0|1|false".to_owned()),
+        "a plain bundle reports the app info it was built with"
+    );
+
+    let root = SecretKey::generate().unwrap();
+    let release = SecretKey::generate().unwrap();
+    let cert = certify(
+        &root,
+        &release.public(),
+        &["com.example.*".into()],
+        0,
+        u64::MAX,
+    );
+    let mut trust = TrustStore::open(dir.join("trust")).unwrap();
+    trust.add_root(root.public());
+    // Its bytecode (as shipped) and its source alone (another runtime's
+    // bytecode) both report the header's.
+    for bytecode_version in [nsh_js::BYTECODE_VERSION, "other"] {
+        let contents = Contents {
+            app: App {
+                id: "com.example.signed".into(),
+                name: "Signed".into(),
+                version: "2.0.0".into(),
+                build: 7,
+            },
+            capabilities: None,
+            source: bundle.code.clone(),
+            bytecode: Some((bytecode.clone(), bytecode_version.into())),
+            source_map: bundle.source_map.clone(),
+            assets: Vec::new(),
+            min_runtime: None,
+        };
+        let bytes = build(&contents, &release, &cert).unwrap();
+        let loaded = nsh_engine::verify_package(&trust, &bytes, &dir.join("packages")).unwrap();
+        assert_eq!(loaded.app.build, 7);
+        let texts = first_texts(loaded.bundle);
+        assert!(
+            texts.contains(&"com.example.signed|Signed|2.0.0|7|false".to_owned()),
+            "{bytecode_version}: {texts:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

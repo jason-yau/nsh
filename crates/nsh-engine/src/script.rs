@@ -165,6 +165,18 @@ mod imp {
             host.set_displays(displays);
             host.set_tokens(tokens);
             host.set_theme_tokens(theme);
+            // A verified package's header is the release the device checked
+            // and enforces: `appInfo()` reports it, not the app info the
+            // bundle was built with (a host may sign an earlier bundle again
+            // under a new build number to roll back).
+            if let Some(package) = &bundle.package {
+                let mut info = nsh_core::platform::AppInfo::default();
+                info.id = Some(package.id.clone());
+                info.name = Some(package.name.clone());
+                info.version = Some(package.version.clone());
+                info.build = Some(package.build);
+                host.set_package_app_info(info);
+            }
             let script = Script {
                 host,
                 exit_requested,

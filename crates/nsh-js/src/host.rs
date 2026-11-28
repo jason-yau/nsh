@@ -1169,6 +1169,18 @@ impl Host {
         });
     }
 
+    /// Sets what `appInfo()` reports for a bundle that came from a verified
+    /// package: the app as its signed header names it. Its known fields
+    /// (`id`, `name`, `version`, `build`) win over what the build wrote into
+    /// the bundle, which a bundle signed again under a new build number
+    /// still carries; `development` stays the build's. Call before
+    /// evaluating the bundle, and only for a verified package.
+    pub fn set_package_app_info(&self, info: nsh_core::platform::AppInfo) {
+        self.cx.with(|cx| {
+            crate::env::set_package_app_info(cx.as_raw().as_ptr(), info);
+        });
+    }
+
     /// True if JS asked for a display frame (`requestAnimationFrame`).
     pub fn wants_frame(&self) -> bool {
         !self.shared.frames.borrow().is_empty()

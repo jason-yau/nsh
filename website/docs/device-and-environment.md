@@ -601,7 +601,8 @@ if let Some(dir) = data_dir() {
 `app_info()` in Rust, `appInfo()` from `nsh` in TSX ([`appInfo`](../modules/nsh.md#appinfo)), is the app as it was
 built: its id, name, version and build number, and whether it is a development build. A package reports what
 `nsh package` names and versions it as, `--id`, `--name`, `--version` and `--build` included, with version `1.0.0` and
-build `1` where nothing gives them; other builds report `nsh.json`'s, `None` where it leaves them out. `nsh run`,
+build `1` where nothing gives them. In TSX, a signed package reports its header's, the release the device verified,
+even when its bundle was built with others; other builds report `nsh.json`'s, `None` where it leaves them out. `nsh run`,
 `nsh dev` and `nsh test` make development builds of a Rust app; `nsh package` does not.
 `app_info()` is `None` in a TSX app, where JS's `appInfo()` reports it.
 

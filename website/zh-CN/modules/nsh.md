@@ -337,7 +337,9 @@ interface AppInfo {
 ```
 
 应用构建时的信息：id、名称、版本号、构建号，以及是否为开发构建。打包产物报告的是 `nsh package`、`nsh publish` 给包的
-名称和版本（包括 `--id`、`--name`、`--version`、`--build`），没有给出时版本为 `1.0.0`、构建号为 `1`；其他构建报告
+名称和版本（包括 `--id`、`--name`、`--version`、`--build`），没有给出时版本为 `1.0.0`、构建号为 `1`。签名包报告的是
+包头中的 id、名称、版本号和构建号，也就是设备校验过的版本，即使它的 bundle 构建时用的是别的值（例如宿主应用为了回滚，
+把较早的 bundle 以新的构建号重新签名）；其他构建报告
 `nsh.json` 的 `"id"`、`"name"`、`"version"` 和 `"build"`，没有的项为 `null`。`nsh run`、`nsh dev`、`nsh test` 和不带
 `--release` 的 `nsh build` 是开发构建；`nsh package`、`nsh publish` 和 `nsh build --release` 不是。在任何平台、任何模块中
 都能读取，包括模块顶层的代码：构建会在应用的模块运行之前把这些信息交给运行时。

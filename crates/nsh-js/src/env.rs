@@ -91,6 +91,9 @@ pub(crate) struct Env {
     displays: RefCell<Vec<Display>>,
     /// What `appInfo()` reports: the build's ([`set_app_info`]).
     app: RefCell<AppInfo>,
+    /// The header of the verified package the bundle came from
+    /// ([`set_package_app_info`]): its known fields win over the build's.
+    package: RefCell<Option<nsh_core::platform::AppInfo>>,
 }
 
 /// The app as it was built (`appInfo()`), from the JSON the bundler writes.
@@ -119,6 +122,7 @@ impl Default for Env {
             built_theme: RefCell::default(),
             displays: RefCell::default(),
             app: RefCell::default(),
+            package: RefCell::default(),
         }
     }
 }
@@ -132,25 +136,46 @@ pub(crate) fn set_app_info(cx: *mut JsContext, json: &str) {
     }
 }
 
-/// `appInfo()`: the app as it was built.
+/// Takes in the app as the verified package the bundle came from names it
+/// (its signed header): its known fields win over what the build wrote,
+/// which may be older (a bundle signed again under a new build number).
+pub(crate) fn set_package_app_info(cx: *mut JsContext, info: nsh_core::platform::AppInfo) {
+    *env(cx).package.borrow_mut() = Some(info);
+}
+
+/// `appInfo()`: the app as it was built, or as its verified package's
+/// header names it.
 unsafe extern "C" fn app_info(
     cx: *mut JsContext,
     _this: JsValue,
     _argc: c_int,
     _argv: *mut JsValue,
 ) -> JsValue {
-    let app = env(cx).app.borrow();
-    let text = |value: &Option<String>| match value {
+    let e = env(cx);
+    let app = e.app.borrow();
+    let package = e.package.borrow();
+    let signed = package.as_ref();
+    // The header's known fields first, then the build's.
+    let id = signed.and_then(|p| p.id.as_ref()).or(app.id.as_ref());
+    let name = signed.and_then(|p| p.name.as_ref()).or(app.name.as_ref());
+    let version = signed
+        .and_then(|p| p.version.as_ref())
+        .or(app.version.as_ref());
+    let build = signed
+        .and_then(|p| p.build)
+        .map(|build| build as f64)
+        .or(app.build);
+    let text = |value: Option<&String>| match value {
         Some(value) => string(cx, value),
         None => qjs::JS_NULL,
     };
     object(
         cx,
         &[
-            (c"id", text(&app.id)),
-            (c"name", text(&app.name)),
-            (c"version", text(&app.version)),
-            (c"build", app.build.map_or(qjs::JS_NULL, qjs::JS_NewFloat64)),
+            (c"id", text(id)),
+            (c"name", text(name)),
+            (c"version", text(version)),
+            (c"build", build.map_or(qjs::JS_NULL, qjs::JS_NewFloat64)),
             (c"development", boolean(app.development)),
         ],
     )
@@ -161,7 +186,7 @@ pub(crate) const APP_INFO_EXPORT: crate::modules::Item = (
     "appInfo",
     Export::Function(app_info, 0),
     Ts::function(
-        "The app as it was built: its id, name, version and build number\n(`nsh.json`'s; a package's as `nsh package` and `nsh publish` name and\nversion it, `--id`, `--name`, `--version` and `--build` included, with\nversion `1.0.0` and build `1` where nothing gives them), and whether it\nis a development build (`nsh run`, `nsh dev`, `nsh test`, `nsh build`\nwithout `--release`). `nsh/updater`'s `shellInfo()` reports the\ninstalled app's.",
+        "The app as it was built: its id, name, version and build number\n(`nsh.json`'s; a signed package's as its verified header names and\nversions it, which `nsh package` and `nsh publish` write from `--id`,\n`--name`, `--version` and `--build`, with version `1.0.0` and build `1`\nwhere nothing gives them), and whether it\nis a development build (`nsh run`, `nsh dev`, `nsh test`, `nsh build`\nwithout `--release`). `nsh/updater`'s `shellInfo()` reports the\ninstalled app's.",
         &["(): AppInfo"],
     ),
 );

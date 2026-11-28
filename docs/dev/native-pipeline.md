@@ -111,7 +111,9 @@ module:
   argument to `setup` is the default as a JSON string, or `null` to leave the status bar alone. Before any other
   import, the entry imports `virtual:nsh-app`, whose `setup(null, null, null, null, app)` hands over what `appInfo()`
   reports (`nsh.json`'s id, name, version and build, the package's `--version` and `--build`, and whether the build is
-  a development one), so a module reads it at its top level; a runtime that predates the fifth argument ignores it. A font import
+  a development one), so a module reads it at its top level; a runtime that predates the fifth argument ignores it. A
+  bundle run from a verified package reports its header's id, name, version and build instead: the engine hands them
+  to the VM before evaluation, and the header wins over what the bundle carries. A font import
   (`import Inter from "./Inter.ttf"`) compiles to `nsh:rt`'s `font(uri, family)`: its family, registered by the host
   before the first frame.
 
