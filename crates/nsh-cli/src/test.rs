@@ -992,21 +992,27 @@ fn is_test_file(path: &Path) -> bool {
 }
 
 /// Adds the test files under `dir` to `out`, outside hidden directories
-/// (`.nsh`), `node_modules` and `target`.
+/// (`.nsh`), `node_modules`, `target` and what Git ignores (`.gitignore`
+/// files, `.git/info/exclude`, the global excludes file). `dir` itself is
+/// searched even when Git ignores it: the command line named it.
 fn find_tests(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if path.is_dir() {
-            if !name.starts_with('.') && name != "node_modules" && name != "target" {
-                find_tests(&path, out);
-            }
-        } else if is_test_file(&path) {
-            out.push(path);
+    let walk = ignore::WalkBuilder::new(dir)
+        .standard_filters(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .parents(true)
+        .follow_links(true)
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            entry.depth() == 0
+                || !entry.file_type().is_some_and(|t| t.is_dir())
+                || (!name.starts_with('.') && name != "node_modules" && name != "target")
+        })
+        .build();
+    for entry in walk.flatten() {
+        if is_test_file(entry.path()) {
+            out.push(entry.into_path());
         }
     }
 }
@@ -1250,6 +1256,52 @@ test src/lib.rs - App (line 3) ... ok
         assert_eq!(
             app_entry(&dir.join("src/cart/Cart.tsx")).unwrap(),
             dir.join("src/cart/Cart.tsx")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Tests in what Git ignores (a local checkout of another project, say)
+    /// are not the app's, unless the command line names their directory.
+    #[test]
+    fn test_files_are_not_looked_for_where_git_ignores() {
+        let dir = std::env::temp_dir().join(format!("nsh-test-ignored-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (file, text) in [
+            (".git/info/exclude", "scratch/\n"),
+            (".gitignore", "ref/\n*.local.test.ts\n"),
+            ("src/.gitignore", "fixtures/\n"),
+            ("App.test.tsx", ""),
+            ("src/Cart.test.ts", ""),
+            ("src/Cart.local.test.ts", ""),
+            ("src/fixtures/Fixture.test.ts", ""),
+            ("ref/other/Other.test.tsx", ""),
+            ("ref/other/Other.local.test.ts", ""),
+            ("scratch/Scratch.test.ts", ""),
+        ] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+        }
+        let dir = dunce::canonicalize(&dir).unwrap();
+        let found = |root: &Path| {
+            let mut found = Vec::new();
+            find_tests(root, &mut found);
+            found.sort();
+            found
+        };
+        assert_eq!(
+            found(&dir),
+            [dir.join("App.test.tsx"), dir.join("src/Cart.test.ts")]
+        );
+        // A directory named on the command line is searched, by the rules
+        // of the files in it.
+        assert_eq!(
+            found(&dir.join("ref")),
+            [dir.join("ref/other/Other.test.tsx")]
+        );
+        assert_eq!(
+            found(&dir.join("src/fixtures")),
+            [dir.join("src/fixtures/Fixture.test.ts")]
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

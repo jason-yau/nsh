@@ -87,7 +87,7 @@ cargo test adds_a_todo        # 名称包含 "adds_a_todo" 的测试
 测试文件是放在代码旁边的 `*.test.tsx` 或 `*.test.ts` 文件，它导入 `nsh/test`，就像上面的 `App.test.tsx`：
 
 ```sh
-nsh test                      # 当前目录中应用的所有测试文件
+nsh test                      # 当前目录中应用的所有测试文件，Git 忽略的除外
 nsh test App.test.tsx         # 一个文件
 nsh test --filter "adds"      # 名称包含 "adds" 的测试
 ```

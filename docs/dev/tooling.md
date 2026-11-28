@@ -595,8 +595,8 @@ Only the engine of a test file serves it: an app's bundle cannot import it (the 
   bounded to `nsh_testing::SCREEN_TEXT_LIMIT` characters (around the first difference when two values are
   shown) so a long value cannot flood the message.
 
-`crates/nsh-cli/src/test.rs` finds the test files (a directory's, outside hidden directories, `node_modules` and
-`target`), prints a line per test (a failure with its message, its frames in the test file and the texts on screen,
+`crates/nsh-cli/src/test.rs` finds the test files (a directory's, outside hidden directories, `node_modules`,
+`target` and what Git ignores, through the `ignore` crate), prints a line per test (a failure with its message, its frames in the test file and the texts on screen,
 bounded to `nsh_testing::SCREEN_TEXT_LIMIT` characters of rendered output with the rest counted; `-v` shows the
 terminal's all, the JUnit report is always cut),
 writes a JUnit XML report with `--junit` (`Tally::junit`) and fails when any test failed. Given a directory of an

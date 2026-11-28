@@ -33,6 +33,7 @@ crossbeam-channel.workspace = true
 anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }
 notify.workspace = true
+ignore.workspace = true
 log.workspace = true
 libc.workspace = true
 ureq.workspace = true

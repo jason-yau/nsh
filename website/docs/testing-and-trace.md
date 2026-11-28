@@ -95,7 +95,7 @@ A test file is a `*.test.tsx` or `*.test.ts` file next to your code. It imports 
 does:
 
 ```sh
-nsh test                      # every test file of the app in the current directory
+nsh test                      # every test file of the app in the current directory, except in what Git ignores
 nsh test App.test.tsx         # one file
 nsh test --filter "adds"      # the tests whose name contains "adds"
 ```

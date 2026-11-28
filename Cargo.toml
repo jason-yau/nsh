@@ -61,6 +61,8 @@ thiserror = "2"
 clap = { version = "4.6", features = ["derive"] }
 crossbeam-channel = "0.5"
 notify = "8.2"
+# What Git ignores, which `nsh test` does not look for tests in.
+ignore = "0.4.34"
 log = "0.4"
 ordered-float = { version = "5", default-features = false }
 env_logger = "0.11"
