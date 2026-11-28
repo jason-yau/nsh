@@ -62,7 +62,7 @@ use objc2_foundation::{
 };
 use objc2_quartz_core::{CALayer, CALayerDelegate, CATransform3D, kCAGravityBottomLeft};
 
-use crate::surface::{Surface, quiet};
+use crate::surface::Surface;
 
 /// Scroll position and extent of a [`ViewKind::Scroll`] view.
 #[derive(Debug, Clone)]
@@ -460,12 +460,21 @@ pub(crate) struct Ivars {
     /// quantized: a descendant's density can step even when this view's
     /// does not, so only an unchanged scale may skip the subtree.
     sharpened: Cell<f64>,
-    /// The parent whose layer this view's layer is in, when the view
-    /// itself is in no view hierarchy: a leaf ([`NshView::leaf_eligible`]).
-    /// Weak: the parent holds its leaves ([`Ivars::leaves`]).
-    leaf_parent: RefCell<Option<objc2::rc::Weak<ViewObj>>>,
-    /// The address of [`Ivars::leaf_parent`] (0: none), compared without
-    /// loading the weak reference ([`NshView::compact_leaves`]).
+    /// The parent view (`NshView`), for both child views and leaves
+    /// ([`NshView::insert_view`], [`NshView::insert_leaf`],
+    /// [`NshView::unparent`]). Weak: the parent holds its child views (through
+    /// AppKit) or leaves ([`Ivars::leaves`]).
+    parent: RefCell<Option<objc2::rc::Weak<ViewObj>>>,
+    /// The parent's [`NodeId`], mirrored from [`Ivars::parent`] so visibility
+    /// passes walk the tree without weak-reference loads or Objective-C calls.
+    parent_id: Cell<Option<NodeId>>,
+    /// The last `setHidden` value written to this `NSView`
+    /// ([`NshView::sync_hidden`]).
+    ns_hidden: Cell<bool>,
+    /// The last frame written to this `NSView` by [`NshView::place`].
+    ns_frame: Cell<NSRect>,
+    /// The address of the parent whose [`Ivars::leaves`] holds this view as
+    /// a leaf layer (0: not a leaf layer).
     leaf_of: Cell<usize>,
     /// Its children that are leaves. A view has either these or child
     /// views, never both, so the layer order is the child order. Between
@@ -906,7 +915,7 @@ define_class!(
                 // Scrolls move views: a frame for the performance monitor.
                 Some(surface) => surface.measure(true, || {
                     crate::input::event(&surface, event);
-                    quiet(|| surface.revisit());
+                    surface.revisit_if_moved();
                 }),
                 // SAFETY: NSResponder's own handling (passes it up).
                 None => unsafe { msg_send![super(self), scrollWheel: event] },
@@ -1003,7 +1012,7 @@ define_class!(
                     let handled = crate::keyboard::key_down(&surface, event)
                         || crate::input::key(&surface, event, true);
                     // Keys scroll too.
-                    quiet(|| surface.revisit());
+                    surface.revisit_if_moved();
                     handled
                 })
             });
@@ -1099,7 +1108,9 @@ define_class!(
         // A leaf (#2066) has no superview: its parent is the view it is in.
         #[unsafe(method_id(accessibilityParent))]
         fn accessibility_parent(&self) -> Option<Retained<AnyObject>> {
-            let leaf_parent = self.ivars().leaf_parent.borrow().as_ref().and_then(|p| p.load());
+            let leaf_parent = (self.ivars().leaf_of.get() != 0)
+                .then(|| self.ivars().parent.borrow().as_ref().and_then(|p| p.load()))
+                .flatten();
             match leaf_parent {
                 Some(parent) => Some(Retained::into_super(Retained::into_super(
                     Retained::into_super(Retained::into_super(parent)),
@@ -1548,7 +1559,7 @@ impl ViewObj {
             surface.measure(drag, || {
                 crate::input::event(&surface, event);
                 if drag {
-                    quiet(|| surface.revisit());
+                    surface.revisit_if_moved();
                 }
             });
         }
@@ -1953,7 +1964,10 @@ impl NshView {
             rastered: Cell::new(false),
             waiting: Cell::new(0),
             sharpened: Cell::new(0.0),
-            leaf_parent: RefCell::new(None),
+            parent: RefCell::new(None),
+            parent_id: Cell::new(None),
+            ns_hidden: Cell::new(false),
+            ns_frame: Cell::new(NSRect::ZERO),
             leaf_of: Cell::new(0),
             leaves: RefCell::new(Vec::new()),
             gone_leaves: Cell::new(0),
@@ -2201,6 +2215,11 @@ impl NshView {
         }
         self.adjust_waiting(1, unplaced);
         true
+    }
+
+    /// Whether this view or any descendant has deferred drawing or placement.
+    pub(crate) fn has_waiting(&self) -> bool {
+        self.ivars().waiting.get() != 0
     }
 
     /// Carries changed marks (or a moved subtree's marks) up the tree.
@@ -2762,9 +2781,16 @@ impl NshView {
             let s = self.state();
             s.id == ROOT_ID && self.ivars().surface.borrow().strong_count() > 0
         };
-        let old_size = self.ns().frame().size;
-        if !root && self.ns().frame() != rect {
+        let window_root = self.ivars().window.borrow().strong_count() > 0;
+        let current = if root || window_root {
+            self.ns().frame()
+        } else {
+            self.ivars().ns_frame.get()
+        };
+        let old_size = current.size;
+        if !root && current != rect {
             self.ns().setFrame(rect);
+            self.ivars().ns_frame.set(rect);
             crate::sight::moved();
             self.size_container();
             crate::native::resized(self);
@@ -2916,19 +2942,22 @@ impl NshView {
 
     /// The view's parent view, if it is attached to one.
     pub(crate) fn parent_view(&self) -> Option<NshView> {
-        if let Some(p) = &*self.ivars().leaf_parent.borrow() {
-            return p.load().map(NshView);
-        }
-        let mut sup = superview(self.ns())?;
-        if sup.downcast_ref::<Container>().is_some() {
-            sup = superview(&sup)?;
-        }
-        NshView::from_ns(&sup)
+        self.ivars()
+            .parent
+            .borrow()
+            .as_ref()
+            .and_then(|p| p.load())
+            .map(NshView)
+    }
+
+    /// The view's parent [`NodeId`], if it is attached to one.
+    pub(crate) fn parent_id(&self) -> Option<NodeId> {
+        self.ivars().parent_id.get()
     }
 
     /// Whether it is in a parent view.
     pub(crate) fn has_parent(&self) -> bool {
-        self.ivars().leaf_parent.borrow().is_some() || superview(self.ns()).is_some()
+        self.ivars().parent_id.get().is_some() || superview(self.ns()).is_some()
     }
 
     /// Its child views, bottom to top: its leaves, when it has them.
@@ -3012,6 +3041,8 @@ impl NshView {
     }
 
     fn insert_view(&self, parent: &NshView, before: Option<&NshView>) {
+        *self.ivars().parent.borrow_mut() = Some(objc2::rc::Weak::from_retained(&parent.0));
+        self.ivars().parent_id.set(Some(parent.id()));
         let container = parent.container();
         match Self::stacked_under(parent, &container, before) {
             Some(above) => container.addSubview_positioned_relativeTo(
@@ -3077,7 +3108,8 @@ impl NshView {
             self.ivars().listed_in.set(this);
             *self.ivars().listed_by.borrow_mut() = Some(objc2::rc::Weak::from_retained(&parent.0));
         }
-        *self.ivars().leaf_parent.borrow_mut() = Some(objc2::rc::Weak::from_retained(&parent.0));
+        *self.ivars().parent.borrow_mut() = Some(objc2::rc::Weak::from_retained(&parent.0));
+        self.ivars().parent_id.set(Some(parent.id()));
         self.ivars()
             .leaf_of
             .set(Retained::as_ptr(&parent.0) as usize);
@@ -3157,7 +3189,7 @@ impl NshView {
 
     /// Whether its layer is in its parent's with no view in the hierarchy.
     pub(crate) fn is_leaf_layer(&self) -> bool {
-        self.ivars().leaf_parent.borrow().is_some()
+        self.ivars().leaf_of.get() != 0
     }
 
     /// Whether it has leaves: its list holds more than those that left it
@@ -3229,7 +3261,8 @@ impl NshView {
         let leaves = std::mem::take(&mut *self.ivars().leaves.borrow_mut());
         for leaf in leaves {
             let leaf = NshView(leaf);
-            leaf.ivars().leaf_parent.borrow_mut().take();
+            leaf.ivars().parent.borrow_mut().take();
+            leaf.ivars().parent_id.set(None);
             leaf.ivars().leaf_of.set(0);
             leaf.ivars().listed_in.set(0);
             leaf.ivars().listed_by.borrow_mut().take();
@@ -3254,10 +3287,10 @@ impl NshView {
 
     /// Takes it out of its parent.
     pub(crate) fn unparent(&self) {
-        let leaf_parent = self.ivars().leaf_parent.borrow_mut().take();
-        if let Some(parent) = leaf_parent {
-            self.ivars().leaf_of.set(0);
-            if let Some(parent) = parent.load().map(NshView) {
+        if self.ivars().leaf_of.replace(0) != 0 {
+            let parent = self.ivars().parent.borrow_mut().take();
+            self.ivars().parent_id.set(None);
+            if let Some(parent) = parent.and_then(|p| p.load()).map(NshView) {
                 // Left in its list until the list is next read or the
                 // batch ends ([`NshView::compact_leaves`]).
                 let gone = parent.ivars().gone_leaves.get();
@@ -3280,6 +3313,8 @@ impl NshView {
         if self.state().input_count != 0 {
             crate::text_input::left(self);
         }
+        self.ivars().parent.borrow_mut().take();
+        self.ivars().parent_id.set(None);
         self.ns().removeFromSuperview();
     }
 
@@ -3466,14 +3501,63 @@ impl NshView {
             let s = self.state();
             s.style.hidden || s.nav_hidden
         };
-        if self.ns().isHidden() == hidden {
+        if self.ivars().ns_hidden.get() == hidden && self.ns().isHidden() == hidden {
             return;
         }
         // `viewDidHide` / `viewDidUnhide` tell `sight` it moved.
+        self.ivars().ns_hidden.set(hidden);
         self.ns().setHidden(hidden);
         if !hidden {
             self.place();
         }
+    }
+
+    /// Whether this non-root view is hidden on its `NSView`
+    /// ([`Self::sync_hidden`]), read without an Objective-C call.
+    pub(crate) fn sight_hidden(&self) -> bool {
+        self.ivars().ns_hidden.get()
+    }
+
+    /// Whether a top-level view (one with no `NshView` parent) is in a window
+    /// and neither it nor any host ancestor is hidden.
+    pub(crate) fn top_shown(&self) -> bool {
+        let ns = self.ns();
+        ns.window().is_some() && !ns.isHiddenOrHasHiddenAncestor()
+    }
+
+    /// Its placed frame as a [`crate::sight::Span`], read from the cached
+    /// [`Ivars::ns_frame`] for child views and from AppKit for top-level views.
+    pub(crate) fn sight_frame(&self) -> crate::sight::Span {
+        let rect = if self.ivars().parent_id.get().is_some() {
+            self.ivars().ns_frame.get()
+        } else {
+            self.ns().frame()
+        };
+        crate::sight::placed(rect)
+    }
+
+    /// Its planned frame (placed or waiting to be placed) as a
+    /// [`crate::sight::Span`].
+    pub(crate) fn planned_span(&self) -> crate::sight::Span {
+        // A running layout animation shows its in-between frame.
+        if self.state().live.is_some() || self.state().id == ROOT_ID {
+            return self.sight_frame();
+        }
+        crate::sight::placed(self.placed_rect())
+    }
+
+    /// Its content origin, zoom and clip flag for
+    /// [`crate::sight::Tree::content`].
+    pub(crate) fn sight_content(&self) -> ((f32, f32), f32, bool) {
+        let clips = {
+            let s = self.state();
+            s.clips() || s.id == ROOT_ID
+        };
+        (
+            crate::scroll::bounds_origin(self),
+            crate::scroll::zoom(self),
+            clips,
+        )
     }
 
     /// Whether the keyboard may reach it, as the headless driver's Tab
@@ -3531,16 +3615,15 @@ impl crate::sight::Tree for Views {
     }
 
     fn hidden(&self, node: &NshView) -> bool {
-        node.ns().isHidden()
+        node.sight_hidden()
     }
 
     fn top_shown(&self, node: &NshView) -> bool {
-        let ns = node.ns();
-        ns.window().is_some() && !ns.isHiddenOrHasHiddenAncestor()
+        node.top_shown()
     }
 
     fn frame(&self, node: &NshView) -> crate::sight::Span {
-        crate::sight::placed(node.ns().frame())
+        node.sight_frame()
     }
 
     fn transform(&self, node: &NshView) -> Option<Matrix> {
@@ -3548,55 +3631,7 @@ impl crate::sight::Tree for Views {
     }
 
     fn content(&self, node: &NshView) -> ((f32, f32), f32, bool) {
-        let clips = {
-            let s = node.state();
-            s.clips() || s.id == ROOT_ID
-        };
-        (
-            crate::scroll::bounds_origin(node),
-            crate::scroll::zoom(node),
-            clips,
-        )
-    }
-}
-
-/// [`Views`] with the frames the layout gave, placed or not: what can be
-/// seen once the views waiting to be placed are ([`crate::mount::Mounter`]).
-pub(crate) struct Planned;
-
-impl crate::sight::Tree for Planned {
-    type Node = NshView;
-
-    fn key(&self, node: &NshView) -> usize {
-        Views.key(node)
-    }
-
-    fn parent(&self, node: &NshView) -> Option<NshView> {
-        Views.parent(node)
-    }
-
-    fn hidden(&self, node: &NshView) -> bool {
-        Views.hidden(node)
-    }
-
-    fn top_shown(&self, node: &NshView) -> bool {
-        Views.top_shown(node)
-    }
-
-    fn frame(&self, node: &NshView) -> crate::sight::Span {
-        // A running layout animation shows its in-between frame.
-        if node.state().live.is_some() || node.state().id == ROOT_ID {
-            return Views.frame(node);
-        }
-        crate::sight::placed(node.placed_rect())
-    }
-
-    fn transform(&self, node: &NshView) -> Option<Matrix> {
-        Views.transform(node)
-    }
-
-    fn content(&self, node: &NshView) -> ((f32, f32), f32, bool) {
-        Views.content(node)
+        node.sight_content()
     }
 }
 

@@ -1018,8 +1018,10 @@ const COMMIT_MS: u64 = 140;
 fn apply_offset(surface: &Rc<Surface>, view: &NshView) {
     let origin = bounds_origin(view);
     // Every offset, inset, zoom and mirroring change comes through here:
-    // what shows under it changed ([`crate::sight`]).
-    crate::sight::moved();
+    // scrolling can only reveal deferred views inside this view's subtree.
+    if view.has_waiting() {
+        crate::sight::moved();
+    }
     let live = {
         let state = view.state();
         state.input_count != 0 || state.scroll.as_ref().is_some_and(|s| s.behavior.zooms())

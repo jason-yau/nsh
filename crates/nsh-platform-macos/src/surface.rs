@@ -1458,7 +1458,7 @@ impl Surface {
         // only a move can show a view put off. A transform counts only
         // when its subtree has deferred drawing or placement, so an
         // endless animation elsewhere does not force a pass every frame.
-        if applied || crate::sight::moves() != self.revisited.get() {
+        if applied || self.needs_revisit() {
             self.revisit();
         }
         // A pad hosted above its input's transforms takes the place those
@@ -1504,6 +1504,22 @@ impl Surface {
         }
         if !on {
             self.revisit();
+        }
+    }
+
+    /// Whether something that can show a deferred view moved since the last
+    /// revisit pass, or a view was queued while a batch held the mounter.
+    pub(crate) fn needs_revisit(&self) -> bool {
+        crate::sight::moves() != self.revisited.get() || !self.resized.borrow().is_empty()
+    }
+
+    /// Runs [`Self::revisit`] inside [`quiet`] only when
+    /// [`Self::needs_revisit`] holds, so input events that queue work for the
+    /// next display-link tick (such as resampled trackpad scrolls) do not force
+    /// a redundant pass.
+    pub(crate) fn revisit_if_moved(&self) {
+        if self.needs_revisit() {
+            quiet(|| self.revisit());
         }
     }
 

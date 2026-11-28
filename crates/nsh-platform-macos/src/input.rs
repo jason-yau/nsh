@@ -3329,7 +3329,7 @@ fn hosted_mouse(surface: &Rc<Surface>, raw: &NSEvent) {
                 enter(surface, window_root);
                 surface.measure(true, || {
                     event(surface, e);
-                    crate::surface::quiet(|| surface.revisit());
+                    surface.revisit_if_moved();
                 });
             }
         }
@@ -3697,7 +3697,7 @@ pub(crate) fn scrolling(surface: &Surface, event: &NSEvent) -> bool {
 pub(crate) fn forward_scroll(surface: &Rc<Surface>, ns_event: &NSEvent) {
     surface.measure(true, || {
         event(surface, ns_event);
-        crate::surface::quiet(|| surface.revisit());
+        surface.revisit_if_moved();
     });
 }
 

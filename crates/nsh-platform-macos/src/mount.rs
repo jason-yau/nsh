@@ -11,11 +11,7 @@ use std::{
 use nsh_core::{Command, LayoutAnimation, MountItem, NodeId, ROOT_ID, ViewKind, canvas::Damage};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::{
-    sight::Sights,
-    surface::Surface,
-    view::{NshView, Planned, Views},
-};
+use crate::{sight::Sights, surface::Surface, view::NshView};
 
 /// The views of a surface.
 pub(crate) struct Mounter {
@@ -38,10 +34,10 @@ pub(crate) struct Mounter {
     live_resize: bool,
     /// The ancestors [`Mounter::revisit`] resolved (kept for the
     /// allocations; cleared on each pass).
-    sights: RefCell<Sights<NshView>>,
+    sights: RefCell<Sights<NodeId>>,
     /// The same over the frames waiting to be placed
     /// ([`Mounter::place_shown`]).
-    planned_sights: RefCell<Sights<NshView>>,
+    planned_sights: RefCell<Sights<NodeId>>,
     /// The views the batch being applied deletes
     /// ([`Mounter::begin_batch`]).
     deleting: FxHashSet<NodeId>,
@@ -155,11 +151,13 @@ impl Mounter {
             Ok(mut sights) => {
                 // Nothing moves while it decides (drawing comes after).
                 sights.clear();
+                let tree = MounterViews(&self.views);
                 let decided = drawn
                     .into_iter()
                     .filter(|(view, _)| self.alive(view))
                     .map(|(view, damage)| {
-                        let shown = sights.shows(&Views, &view);
+                        let id = view.id();
+                        let shown = sights.shows(&tree, &id);
                         (view, damage, shown)
                     })
                     .collect();
@@ -215,8 +213,12 @@ impl Mounter {
         // Nothing moves while the pass decides (drawing comes after), so
         // what it resolves stays true until it ends.
         sights.clear();
+        let tree = MounterViews(&self.views);
         let shown: Vec<NshView> = stale
-            .extract_if(.., |v| !self.alive(v) || sights.shows(&Views, v))
+            .extract_if(.., |v| {
+                let id = v.id();
+                self.views.get(&id) != Some(v) || sights.shows(&tree, &id)
+            })
             .collect();
         sights.clear();
         drop(sights);
@@ -269,9 +271,14 @@ impl Mounter {
         };
         sights.clear();
         planned.clear();
+        let tree = MounterViews(&self.views);
+        let planned_tree = MounterPlanned(&self.views);
         let shown: Vec<NshView> = unplaced
             .extract_if(.., |v| {
-                !self.alive(v) || planned.shows(&Planned, v) || sights.shows(&Views, v)
+                let id = v.id();
+                self.views.get(&id) != Some(v)
+                    || planned.shows(&planned_tree, &id)
+                    || sights.shows(&tree, &id)
             })
             .collect();
         sights.clear();
@@ -833,6 +840,86 @@ impl Mounter {
             }
             other => crate::system::command(surface, id, other),
         }
+    }
+}
+
+/// Visibility tree keyed by [`NodeId`] over [`Mounter::views`] so passes over
+/// deferred views resolve ancestors in Rust without retaining views or loading
+/// weak Objective-C references.
+struct MounterViews<'a>(&'a FxHashMap<NodeId, NshView>);
+
+impl crate::sight::Tree for MounterViews<'_> {
+    type Node = NodeId;
+
+    fn key(&self, node: &NodeId) -> usize {
+        *node as usize
+    }
+
+    fn parent(&self, node: &NodeId) -> Option<NodeId> {
+        let parent = self.0.get(node)?.parent_id()?;
+        self.0.contains_key(&parent).then_some(parent)
+    }
+
+    fn hidden(&self, node: &NodeId) -> bool {
+        self.0.get(node).is_none_or(NshView::sight_hidden)
+    }
+
+    fn top_shown(&self, node: &NodeId) -> bool {
+        self.0.get(node).is_some_and(NshView::top_shown)
+    }
+
+    fn frame(&self, node: &NodeId) -> crate::sight::Span {
+        self.0
+            .get(node)
+            .map_or((0.0, 0.0, 0.0, 0.0), NshView::sight_frame)
+    }
+
+    fn transform(&self, node: &NodeId) -> Option<nsh_core::Matrix> {
+        self.0.get(node)?.state().transform()
+    }
+
+    fn content(&self, node: &NodeId) -> ((f32, f32), f32, bool) {
+        self.0
+            .get(node)
+            .map_or(((0.0, 0.0), 1.0, false), NshView::sight_content)
+    }
+}
+
+/// [`MounterViews`] with planned frames (placed or waiting to be placed) for
+/// [`Mounter::place_shown`].
+struct MounterPlanned<'a>(&'a FxHashMap<NodeId, NshView>);
+
+impl crate::sight::Tree for MounterPlanned<'_> {
+    type Node = NodeId;
+
+    fn key(&self, node: &NodeId) -> usize {
+        *node as usize
+    }
+
+    fn parent(&self, node: &NodeId) -> Option<NodeId> {
+        MounterViews(self.0).parent(node)
+    }
+
+    fn hidden(&self, node: &NodeId) -> bool {
+        MounterViews(self.0).hidden(node)
+    }
+
+    fn top_shown(&self, node: &NodeId) -> bool {
+        MounterViews(self.0).top_shown(node)
+    }
+
+    fn frame(&self, node: &NodeId) -> crate::sight::Span {
+        self.0
+            .get(node)
+            .map_or((0.0, 0.0, 0.0, 0.0), NshView::planned_span)
+    }
+
+    fn transform(&self, node: &NodeId) -> Option<nsh_core::Matrix> {
+        MounterViews(self.0).transform(node)
+    }
+
+    fn content(&self, node: &NodeId) -> ((f32, f32), f32, bool) {
+        MounterViews(self.0).content(node)
     }
 }
 
